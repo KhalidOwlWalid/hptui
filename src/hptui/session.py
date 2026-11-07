@@ -1,4 +1,8 @@
-"""Interactive curses interface."""
+"""Frontend-independent TUI state and key handling.
+
+Keys use the curses vocabulary (curses.KEY_* constants and characters) so the
+curses frontend can pass them straight through; other frontends translate.
+"""
 
 from __future__ import annotations
 
@@ -83,7 +87,7 @@ class LineEdit:
 
 
 @dataclass
-class App:
+class Session:
     options: list[Option]
     cmd: LineEdit
     fields: dict[str, LineEdit] = field(default_factory=dict)
@@ -104,6 +108,9 @@ class App:
     hist_scroll: int = 0
     hist_query: str = ""
     hist_searching: bool = False
+    # "?" key reference
+    help_open: bool = False
+    help_scroll: int = 0
     edit_request: str | None = None  # standalone: command the user wants to edit
 
     # ---- derived state -------------------------------------------------
@@ -189,6 +196,8 @@ class App:
         self.message = ""
         if key == CTRL_C:
             return self.cancel()
+        if self.help_open:
+            return self.handle_help(key)
         if self.hist_open:
             return self.handle_history(key)
         if key == CTRL_S:
@@ -300,6 +309,8 @@ class App:
             self.cmd.cursor = len(self.cmd.text)
         elif key == "H":
             self.open_history()
+        elif key == "?":
+            self.open_help()
         elif key == "q":
             self.cancel()
         elif key == ESC and self.query:
@@ -415,52 +426,50 @@ class App:
         elif key == "/":
             self.hist_searching = True
             self.hist_index = 0
+        elif key == "?":
+            self.open_help()
         elif key == ESC and self.hist_query:
             self.hist_query = ""
         elif key in (ESC, "q", "h", "H", CTRL_R):
             self.close_history()
         self.hist_index = max(0, min(self.hist_index, len(self.hist_filtered()) - 1))
 
+    # ---- "?" help ------------------------------------------------------------
 
-# ---- drawing -----------------------------------------------------------------
+    def open_help(self) -> None:
+        self.help_open, self.help_scroll = True, 0
 
-class Theme:
-    def __init__(self) -> None:
-        self.accent = self.checked = self.dim = self.error = curses.A_BOLD
-        if curses.has_colors():
-            curses.start_color()
-            try:
-                curses.use_default_colors()
-                bg = -1
-            except curses.error:
-                bg = curses.COLOR_BLACK
-            curses.init_pair(1, curses.COLOR_CYAN, bg)
-            curses.init_pair(2, curses.COLOR_GREEN, bg)
-            curses.init_pair(3, curses.COLOR_YELLOW, bg)
-            self.accent = curses.color_pair(1) | curses.A_BOLD
-            self.checked = curses.color_pair(2) | curses.A_BOLD
-            self.label = curses.color_pair(3)
-            self.dim = curses.A_DIM
-        else:
-            self.label = curses.A_BOLD
-
-
-def _put(win, y: int, x: int, text: str, attr: int = 0) -> None:
-    h, w = win.getmaxyx()
-    if y < 0 or y >= h or x >= w:
-        return
-    text = text[: max(0, w - x - (1 if y == h - 1 else 0))]
-    try:
-        win.addstr(y, x, text, attr)
-    except curses.error:
-        pass
+    def handle_help(self, key) -> None:
+        """Scroll with j/k etc.; frontends clamp help_scroll to the content height."""
+        if key in (curses.KEY_DOWN, "j"):
+            self.help_scroll += 1
+        elif key in (curses.KEY_UP, "k"):
+            self.help_scroll -= 1
+        elif key in (curses.KEY_NPAGE, CTRL_D, " "):
+            self.help_scroll += 10
+        elif key in (curses.KEY_PPAGE, CTRL_U):
+            self.help_scroll -= 10
+        elif key in ("g", curses.KEY_HOME):
+            self.help_scroll = 0
+        elif key in ("G", curses.KEY_END):
+            self.help_scroll = 10_000
+        elif key in (ESC, "q", "?", "h", *ENTER_KEYS):
+            self.help_open = False
+        self.help_scroll = max(0, self.help_scroll)
 
 
-def _wrap(text: str, width: int) -> list[str]:
+# ---- layout helpers shared by the frontends ------------------------------------
+
+def wrap(text: str, width: int) -> list[str]:
     return textwrap.wrap(text, max(10, width), break_on_hyphens=False) or [""]
 
 
-def _option_lines(opt: Option, checked: bool, spec_w: int, w: int) -> list[str]:
+def spec_width(items: list[Option], w: int) -> int:
+    # Flags longer than the column get their own line, so keep the column modest.
+    return min(26, w // 3, max((len(o.spec) for o in items), default=0))
+
+
+def option_lines(opt: Option, checked: bool, spec_w: int, w: int) -> list[str]:
     """One option as screen lines, with the description wrapped under its own column."""
     head = f" {'[x]' if checked else '[ ]'} "
     indent = len(head) + spec_w + 2
@@ -469,14 +478,23 @@ def _option_lines(opt: Option, checked: bool, spec_w: int, w: int) -> list[str]:
         indent, desc_w = len(head) + 2, w - 1 - len(head) - 2
     if not opt.description:
         return [head + opt.spec]
-    desc = _wrap(opt.description, desc_w)
+    desc = wrap(opt.description, desc_w)
     if len(head) + len(opt.spec) + 2 > indent:  # flags don't fit the column: own line
         return [head + opt.spec] + [" " * indent + d for d in desc]
     first = (head + opt.spec).ljust(indent) + desc[0]
     return [first] + [" " * indent + d for d in desc[1:]]
 
 
-def _fit_scroll(heights: list[int], index: int, scroll: int, avail: int) -> int:
+HISTORY_INDENT = 12  # " 10m ago  " column
+
+
+def history_lines(entry: history.Entry, w: int) -> list[str]:
+    cmd = textwrap.wrap(entry.command, max(10, w - 1 - HISTORY_INDENT), break_on_hyphens=False,
+                        drop_whitespace=False) or [""]
+    return [f" {history.ago(entry.time).rjust(9)}  {cmd[0]}"] + [" " * HISTORY_INDENT + c for c in cmd[1:]]
+
+
+def fit_scroll(heights: list[int], index: int, scroll: int, avail: int) -> int:
     """First item to show so that the item at `index` is fully on screen."""
     if not heights:
         return 0
@@ -486,214 +504,146 @@ def _fit_scroll(heights: list[int], index: int, scroll: int, avail: int) -> int:
     return scroll
 
 
-def _draw_rows(win, y: int, avail: int, rows: list[list[str]], scroll: int, cursor: int | None, attr_of) -> None:
-    w = win.getmaxyx()[1]
-    used = 0
-    for i in range(scroll, len(rows)):
-        if used >= avail:
-            break
-        attr = attr_of(i) | (curses.A_REVERSE if i == cursor else 0)
-        for line in rows[i][: avail - used]:
-            _put(win, y + used, 0, line.ljust(w - 1) if i == cursor else line, attr)
-            used += 1
+def options_header(s: Session) -> tuple[str, str]:
+    """("Options (n/m selected)", search/filter hint)."""
+    header = f"Options ({len(s.occurrences())}/{len(s.options)} selected)"
+    if s.searching:
+        return header, f"/{s.query}"
+    if s.query:
+        return header, f"filter: {s.query}  (esc clears)"
+    return header, "/ to search" if s.focus == "list" else ""
 
 
-def draw(win, app: App, theme: Theme, title: str) -> None:
-    win.erase()
-    h, w = win.getmaxyx()
-    cursor_pos: tuple[int, int] | None = None
-    occs = app.occurrences()
+def history_header(s: Session) -> tuple[str, str]:
+    header = f"History · {s.program or 'all programs'} ({len(s.hist_filtered())})"
+    if s.hist_searching:
+        return header, f"/{s.hist_query}"
+    if s.hist_query:
+        return header, f"filter: {s.hist_query}  (esc clears)"
+    return header, "/ to search"
 
-    _put(win, 0, 0, f" hptui · {title} ".ljust(w), curses.A_REVERSE | curses.A_BOLD)
 
-    # command box
-    y = 2
-    prompt = "❯ "
-    focused = app.focus == "cmd"
-    _put(win, y, 0, prompt, theme.accent if focused else theme.dim)
-    text, col = app.cmd.visible(w - len(prompt) - 1)
-    _put(win, y, len(prompt), text, curses.A_BOLD if focused else 0)
-    if focused:
-        cursor_pos = (y, len(prompt) + col)
-    _put(win, y + 1, 0, "─" * (w - 1), theme.accent if focused else theme.dim)
-    y += 3
+def history_empty_message(s: Session) -> str:
+    if s.hist_query:
+        return "no matches"
+    return f"no history yet for {s.program}" if s.program else "no history yet"
 
-    if app.hist_open:
-        cursor_pos = draw_history(win, app, theme, y)
-        return _finish(win, cursor_pos)
 
-    # one input box per checked option that takes a value
-    value_opts = app.value_options()
-    if value_opts:
-        label_w = min(24, max(len(o.name) for o in value_opts)) + 1
-        max_rows = max(1, (h - y - 6) // 2)
-        for opt in value_opts[:max_rows]:
-            key = f"field:{opt.key}"
-            box = app.fields.get(opt.key, LineEdit())
-            focused = app.focus == key
-            label = f"{opt.name}:".ljust(label_w + 1)
-            _put(win, y, 2, label, theme.accent if focused else theme.label)
-            x = 2 + len(label) + 1
-            text, col = box.visible(w - x - 1)
-            hint = "" if box.text or focused else f"<{opt.metavar}>"
-            _put(win, y, x, text or hint, (curses.A_UNDERLINE if focused else 0) | (theme.dim if hint else 0))
-            if focused:
-                cursor_pos = (y, x + col)
-            y += 1
-        y += 1
-
-    # option list
-    items = app.filtered()
-    header = f"Options ({len(occs)}/{len(app.options)} selected)"
-    _put(win, y, 0, header, curses.A_BOLD)
-    if app.searching:
-        prompt = f"/{app.query}"
-        _put(win, y, len(header) + 2, prompt, theme.accent)
-        if app.focus == "list":
-            cursor_pos = (y, len(header) + 2 + len(prompt))
-    elif app.query:
-        _put(win, y, len(header) + 2, f"filter: {app.query}  (esc clears)", theme.accent)
-    elif app.focus == "list":
-        _put(win, y, len(header) + 2, "/ to search", theme.dim)
-    y += 1
-
-    list_h = max(1, h - y - 2)
-    # Flags longer than the column get their own line, so keep the column modest.
-    spec_w = min(26, w // 3, max((len(o.spec) for o in items), default=0))
-    rows = [_option_lines(o, o.key in occs, spec_w, w) for o in items]
-    app.list_scroll = _fit_scroll([len(r) for r in rows], app.list_index, app.list_scroll, list_h)
-    _draw_rows(
-        win, y, list_h, rows, app.list_scroll,
-        cursor=app.list_index if app.focus == "list" else None,
-        attr_of=lambda i: theme.checked if items[i].key in occs else 0,
-    )
+def history_status(s: Session) -> str:
+    items = s.hist_filtered()
     if not items:
-        _put(win, y, 2, "no options match", theme.dim)
-
-    if app.message:
-        _put(win, h - 2, 0, app.message, theme.accent)
-    keys = {
-        "list": "j/k move · space toggle · l edit · / search · ^P command · H history · ^S done · q quit",
-        "search": "type to filter · ↑↓ move · enter pick · esc browse results",
-        "cmd": "enter done · ^P options · tab/↓ next · esc back to list",
-    }.get("search" if app.searching and app.focus == "list" else app.focus, "enter set value · esc discard · tab/↑↓ move · ^P command · ^S done")
-    _put(win, h - 1, 0, f" {keys} ".ljust(w), curses.A_REVERSE)
-    _finish(win, cursor_pos)
+        return ""
+    cwd = items[s.hist_index].cwd.replace(os.path.expanduser("~"), "~", 1)
+    return f"ran in {cwd}" if cwd else ""
 
 
-def draw_history(win, app: App, theme: Theme, y: int) -> tuple[int, int] | None:
-    h, w = win.getmaxyx()
-    cursor_pos = None
-    items = app.hist_filtered()
-    header = f"History · {app.program or 'all programs'} ({len(items)})"
-    _put(win, y, 0, header, curses.A_BOLD)
-    x = len(header) + 2
-    if app.hist_searching:
-        _put(win, y, x, f"/{app.hist_query}", theme.accent)
-        cursor_pos = (y, x + 1 + len(app.hist_query))
-    elif app.hist_query:
-        _put(win, y, x, f"filter: {app.hist_query}  (esc clears)", theme.accent)
-    else:
-        _put(win, y, x, "/ to search", theme.dim)
-    y += 1
-
-    list_h = max(1, h - y - 3)
-    indent = 12  # " 10m ago  " column
-    rows = []
-    for entry in items:
-        cmd = textwrap.wrap(entry.command, max(10, w - 1 - indent), break_on_hyphens=False,
-                            drop_whitespace=False) or [""]
-        rows.append([f" {history.ago(entry.time).rjust(9)}  {cmd[0]}"] + [" " * indent + c for c in cmd[1:]])
-    app.hist_scroll = _fit_scroll([len(r) for r in rows], app.hist_index, app.hist_scroll, list_h)
-    _draw_rows(win, y, list_h, rows, app.hist_scroll, cursor=app.hist_index, attr_of=lambda i: 0)
-    if not items:
-        msg = "no matches" if app.hist_query else f"no history yet for {app.program}" if app.program else "no history yet"
-        _put(win, y, 2, msg, theme.dim)
-
-    if items:
-        cwd = items[app.hist_index].cwd.replace(os.path.expanduser("~"), "~", 1)
-        _put(win, h - 2, 0, f"ran in {cwd}" if cwd else "", theme.dim)
-    if app.message:
-        _put(win, h - 2, 0, app.message, theme.accent)
-    edit = "enter edit" if not app.standalone else "enter edit (opens options)"
-    keys = (
-        "type to filter · ↑↓ move · enter edit · ^S use as-is · esc stop"
-        if app.hist_searching
-        else f"j/k move · {edit} · r use as-is · d delete · / search · esc {'quit' if app.standalone else 'back'}"
-    )
-    _put(win, h - 1, 0, f" {keys} ".ljust(w), curses.A_REVERSE)
-    return cursor_pos
-
-
-def _finish(win, cursor_pos: tuple[int, int] | None) -> None:
-    if cursor_pos:
-        try:
-            curses.curs_set(1)
-        except curses.error:
-            pass
-        win.move(*cursor_pos)
-    else:
-        try:
-            curses.curs_set(0)
-        except curses.error:
-            pass
-    win.refresh()
+HELP: list[tuple[str, list[tuple[str, str]]]] = [
+    ("Anywhere", [
+        ("Tab / Shift-Tab", "move between command box, value boxes and options"),
+        ("Ctrl-P", "jump between the command box and the options"),
+        ("Ctrl-R", "open this program's history"),
+        ("Ctrl-S", "done: run the command (prints it when output is captured)"),
+        ("Ctrl-C", "quit without output"),
+    ]),
+    ("Option list", [
+        ("j / k, ↑ / ↓", "move down / up (k at the top moves to the boxes)"),
+        ("Ctrl-D / Ctrl-U", "half a page down / up"),
+        ("g / G", "first / last option"),
+        ("Space", "toggle option"),
+        ("l / Enter", "toggle option and edit its value"),
+        ("h", "uncheck option"),
+        ("/", "search"),
+        ("i / a", "edit the command box"),
+        ("H", "history"),
+        ("Esc", "clear the search filter"),
+        ("?", "this help"),
+        ("q", "quit without output"),
+    ]),
+    ("Search (after /)", [
+        ("type, Backspace, Ctrl-W", "edit the query"),
+        ("↑ / ↓, Ctrl-D / Ctrl-U", "move through matches"),
+        ("Enter", "pick the match and edit its value"),
+        ("Esc", "stop typing, keep the results to browse with j/k"),
+    ]),
+    ("Value box", [
+        ("Enter", "write the value into the command"),
+        ("Esc", "discard the edit"),
+        ("↑ / ↓", "previous / next box"),
+    ]),
+    ("Command box", [
+        ("Enter", "done"),
+        ("Esc", "back to the options"),
+        ("Ctrl-A / Ctrl-E", "start / end of line"),
+        ("Ctrl-W / Ctrl-U / Ctrl-K", "delete word / to start / to end"),
+    ]),
+    ("History", [
+        ("j / k, g / G", "move, first / last"),
+        ("Enter / l", "load the command to edit it"),
+        ("r / Ctrl-S", "use the command as-is"),
+        ("d", "delete the entry"),
+        ("/", "search"),
+        ("?", "this help"),
+        ("Esc / q / h", "back to the options"),
+    ]),
+]
 
 
-def _read_key(win):
-    key = win.get_wch()
-    if key == ESC:
-        # Alt+<key> and unknown escape sequences arrive as ESC followed by more
-        # bytes; swallow them all so only a lone ESC counts.
-        win.nodelay(True)
-        extra = False
-        try:
-            while True:
-                win.get_wch()
-                extra = True
-        except curses.error:
-            pass
-        finally:
-            win.nodelay(False)
-        if extra:
-            return None
-    return key
+def help_lines(w: int) -> list[tuple[str, str, int]]:
+    """The key reference as (text, kind, key_end) lines.
+
+    kind is "section", "key" or "" (a wrapped continuation); key_end is where the
+    key column ends on "key" lines so frontends can colour it.
+    """
+    key_w = max(len(k) for _, rows in HELP for k, _ in rows) + 3
+    if w - key_w < 24:  # narrow: action goes under the key
+        key_w = 4
+    out: list[tuple[str, str, int]] = []
+    for title, rows in HELP:
+        if out:
+            out.append(("", "", 0))
+        out.append((f" {title}", "section", 0))
+        for k, action in rows:
+            key_end = 3 + len(k)
+            desc = wrap(action, w - key_w - 3)
+            if key_w == 4:
+                out.append((f"   {k}", "key", key_end))
+            else:
+                out.append((f"   {k}".ljust(key_w + 2) + desc[0], "key", key_end))
+                desc = desc[1:]
+            out += [(" " * (key_w + 2) + d, "", 0) for d in desc]
+    return out
 
 
-def run(
+def key_hints(s: Session) -> str:
+    if s.help_open:
+        return "j/k scroll · esc / q / ? close"
+    if s.hist_open:
+        if s.hist_searching:
+            return "type to filter · ↑↓ move · enter edit · ^S use as-is · esc stop"
+        edit = "enter edit (opens options)" if s.standalone else "enter edit"
+        back = "quit" if s.standalone else "back"
+        return f"j/k move · {edit} · r use as-is · d delete · / search · ? help · esc {back}"
+    if s.focus == "list":
+        if s.searching:
+            return "type to filter · ↑↓ move · enter pick · esc browse results"
+        return "j/k move · space toggle · l edit · / search · ^P command · ^S done · ? help"
+    if s.focus == "cmd":
+        return "enter done · ^P options · tab/↓ next · esc back to list"
+    return "enter set value · esc discard · tab/↑↓ move · ^P command · ^S done"
+
+
+def new_session(
     options: list[Option],
     command: str,
-    title: str | None = None,
     *,
     program: str | None = None,
     open_history: bool = False,
     standalone: bool = False,
-) -> App:
-    """Show the TUI. app.result is the final command (None if cancelled)."""
-    app = App(options=options, cmd=LineEdit(), standalone=standalone)
-    app.program = history.program_of(command) if program is None else program
-    app.cmd.set(command.rstrip() + " " if command else "")
-    app.sync_fields()
+) -> Session:
+    s = Session(options=options, cmd=LineEdit(), standalone=standalone)
+    s.program = history.program_of(command) if program is None else program
+    s.cmd.set(command.rstrip() + " " if command else "")
+    s.sync_fields()
     if open_history or standalone:
-        app.open_history()
-
-    def main(stdscr) -> None:
-        try:
-            curses.set_escdelay(25)
-        except AttributeError:
-            pass
-        curses.raw()
-        stdscr.keypad(True)
-        theme = Theme()
-        while not app.done:
-            draw(stdscr, app, theme, title or command or "history")
-            try:
-                key = _read_key(stdscr)
-            except curses.error:
-                continue
-            if key is None or key == curses.KEY_RESIZE:
-                continue
-            app.handle(key)
-
-    curses.wrapper(main)
-    return app
+        s.open_history()
+    return s

@@ -9,7 +9,7 @@ import shlex
 import subprocess
 import sys
 
-from . import history
+from . import config, history
 from .parser import guess_command, parse_help
 
 __all__ = ["main"]
@@ -26,7 +26,8 @@ def _build_argparser() -> argparse.ArgumentParser:
             "  hptui -p help2man                 print the command instead of running it\n"
             '  eval "$(hptui help2man)"          run it in the current shell (output captured, so it prints)\n'
             "  hptui --history                   pick a past command from any program\n"
-            "  hptui --history help2man          start in help2man's history"
+            "  hptui --history help2man          start in help2man's history\n"
+            "  hptui --frontend=textual          switch to the Textual frontend (remembered)"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -38,6 +39,12 @@ def _build_argparser() -> argparse.ArgumentParser:
     mode.add_argument("-p", "--print", action="store_true",
                       help="always print the command instead of running it (default when output is captured)")
     p.add_argument("-H", "--history", action="store_true", help="start in the command history (all programs if none given)")
+    p.add_argument(
+        "--frontend", choices=config.FRONTENDS,
+        help="UI to use, remembered for future runs (default: curses). "
+             "curses is faster to start and has no dependencies; "
+             "textual adds mouse support, paste and nicer styling but starts slower",
+    )
     return p
 
 
@@ -96,7 +103,18 @@ def main() -> None:
     args = _build_argparser().parse_args()
     # Run when used directly in a terminal; print when captured, e.g. "$(hptui ls)".
     run_it = args.exec or (not args.print and sys.stdout.isatty())
-    from .tui import run  # curses import is deferred so --help works anywhere
+
+    if args.frontend:
+        config.save(frontend=args.frontend)
+        if sys.stdin.isatty() and not args.program and not args.history:
+            print(f"hptui: frontend set to {args.frontend} (saved in {config.path()})", file=sys.stderr)
+            return
+    frontend = args.frontend or config.load()["frontend"]
+    # UI imports are deferred so --help stays fast; textual is only imported when chosen.
+    if frontend == "textual":
+        from .textual_ui import run
+    else:
+        from .curses_ui import run
 
     locale.setlocale(locale.LC_ALL, "")
 

@@ -30,7 +30,27 @@ uv tool upgrade hptui          # pick up changes after a normal (non-editable) i
 uv tool uninstall hptui        # remove it
 ```
 
+## Frontends
+
+hptui has two interchangeable frontends with the same keys and behaviour:
+
+| Frontend            | Notes                                                              |
+|---------------------|--------------------------------------------------------------------|
+| `curses` (default)  | Faster: starts about 4x quicker, uses only the Python standard library |
+| `textual`           | Mouse support (click to toggle, scroll wheel), paste, nicer styling |
+
+```shell
+hptui --frontend=textual       # switch; remembered for future runs
+hptui --frontend=curses        # switch back
+```
+
+The choice is saved in `~/.config/hptui/config.json` (override with
+`$HPTUI_CONFIG` or `$XDG_CONFIG_HOME`). Passing `--frontend` alongside a
+program (`hptui --frontend=textual ls`) uses and saves it in one go.
+
 ## Keys
+
+Press `?` in the option list or history to see all of these inside hptui.
 
 The option list uses vim-style keys. Arrow keys work everywhere too.
 
@@ -48,6 +68,7 @@ The option list uses vim-style keys. Arrow keys work everywhere too.
 | option list  | `/`                         | quick search                                    |
 | option list  | `i` / `a`                   | edit the command box                            |
 | option list  | `Esc`                       | clear filter                                    |
+| option list  | `?`                         | show every keybinding (also from history)       |
 | option list  | `q`                         | quit without output                             |
 | search       | type, `Backspace`, `Ctrl-W` | edit the query                                  |
 | search       | `↑`/`↓`, `Ctrl-D`/`Ctrl-U`  | move through matches                            |
@@ -89,3 +110,7 @@ opens the full option editor with the command loaded.
 ```shell
 uv run pytest
 ```
+
+Code layout: `parser.py` reads help text, `cmdline.py` edits the command line,
+`history.py` and `config.py` handle storage, `session.py` holds all UI state
+and key handling, and `curses_ui.py` / `textual_ui.py` only draw it.
