@@ -18,8 +18,9 @@ from textual.widgets import Static
 
 from .parser import Option
 from .session import (
-    ESC, LineEdit, Session, fit_scroll, help_lines, history_empty_message, history_header, history_lines,
-    history_status, key_hints, new_session, option_lines, options_header, spec_width,
+    ESC, LineEdit, Segment, Session, command_kinds, fit_scroll, help_lines, history_empty_message,
+    history_header, history_segments, history_status, key_hints, new_session, option_segments,
+    options_header, runs, spec_width, title_segments,
 )
 
 _KEYS = {
@@ -28,6 +29,29 @@ _KEYS = {
     "delete": curses.KEY_DC, "shift+tab": curses.KEY_BTAB,
     "enter": "\r", "escape": ESC, "tab": "\t", "backspace": "\x7f", "ctrl+h": "\x7f", "space": " ",
 }
+
+# Dracula palette, matching the curses frontend and Textual's built-in "dracula" theme.
+_STYLES = {
+    "program": "bold #ff79c6", "flag": "#8be9fd", "punct": "#6272a4", "value": "#f1fa8c",
+    "string": "#50fa7b", "op": "bold #ff5555", "metavar": "#bd93f9", "check": "bold #50fa7b",
+    "uncheck": "#6272a4", "time": "#6272a4", "dim": "#6272a4", "match": "bold #282a36 on #f1fa8c",
+    "section": "bold #ff79c6", "key": "bold #f1fa8c", "accent": "bold #8be9fd", "label": "#8be9fd",
+    "title": "bold #f1fa8c",
+}
+STYLE = {k: Style.parse(v) for k, v in _STYLES.items()}
+CURSOR = Style(bgcolor="#44475a", bold=True)  # Dracula "current line"
+
+
+def style(kind: str, cursor: bool = False) -> Style:
+    base = STYLE.get(kind, Style())
+    return CURSOR + base if cursor else base
+
+
+def segments_text(segments: list[Segment], cursor: bool = False) -> Text:
+    text = Text()
+    for chunk, kind in segments:
+        text.append(chunk, style(kind, cursor))
+    return text
 
 
 def translate(event: events.Key):
@@ -42,11 +66,15 @@ def translate(event: events.Key):
     return None
 
 
-def _edit_text(box: LineEdit, width: int, show_cursor: bool, placeholder: str = "") -> Text:
+def _edit_text(box: LineEdit, width: int, show_cursor: bool, placeholder: str = "",
+               kinds: list[str] | None = None, kind: str = "") -> Text:
+    """A LineEdit's visible slice, coloured, with a block cursor when focused."""
     visible, col = box.visible(max(1, width - 1))
     if not visible and not show_cursor:
-        return Text(placeholder, style="dim")
-    text = Text(visible)
+        return Text(placeholder, style=style("dim"))
+    if kinds is None:
+        kinds = [kind] * len(box.text)
+    text = segments_text(runs(visible, kinds[box.scroll:box.scroll + len(visible)]))
     if show_cursor:
         if col >= len(visible):
             text.append(" ")
@@ -59,16 +87,11 @@ class SessionView(Widget):
     def s(self) -> Session:
         return self.app.session  # type: ignore[attr-defined]
 
-    def style_of(self, name: str) -> Style:
-        return self.get_component_rich_style(name, partial=True)
-
 
 class CommandBox(SessionView):
-    COMPONENT_CLASSES = {"commandbox--prompt"}
     DEFAULT_CSS = """
     CommandBox { height: 3; border: round $foreground 25%; border-title-color: $text-muted; padding: 0 1; }
     CommandBox.-focused { border: round $accent; border-title-color: $accent; }
-    CommandBox > .commandbox--prompt { color: $accent; text-style: bold; }
     """
     PROMPT = "❯ "
 
@@ -76,14 +99,16 @@ class CommandBox(SessionView):
         self.border_title = "command"
 
     def render(self) -> Text:
-        focused = self.s.focus == "cmd" and not self.s.hist_open and not self.s.help_open
-        text = Text(self.PROMPT, style=self.style_of("commandbox--prompt"))
-        text.append_text(_edit_text(self.s.cmd, self.size.width - len(self.PROMPT), focused))
+        s = self.s
+        focused = s.focus == "cmd" and not s.hist_open and not s.help_open
+        text = Text(self.PROMPT, style=style("accent" if focused else "dim"))
+        kinds = command_kinds(s.cmd.text, s.options)
+        text.append_text(_edit_text(s.cmd, self.size.width - len(self.PROMPT), focused, kinds=kinds))
         return text
 
     def on_click(self, event: events.Click) -> None:
         s = self.s
-        if s.hist_open:
+        if s.hist_open or s.help_open:
             return
         s.commit_field()
         s.searching = False
@@ -95,12 +120,9 @@ class CommandBox(SessionView):
 
 
 class FieldsView(SessionView):
-    COMPONENT_CLASSES = {"fields--label", "fields--focused"}
     DEFAULT_CSS = """
     FieldsView { height: auto; border: round $foreground 25%; border-title-color: $text-muted; padding: 0 1; }
     FieldsView.-focused { border: round $accent; border-title-color: $accent; }
-    FieldsView > .fields--label { color: $warning; }
-    FieldsView > .fields--focused { color: $accent; text-style: bold; }
     """
 
     def on_mount(self) -> None:
@@ -117,8 +139,8 @@ class FieldsView(SessionView):
         for i, opt in enumerate(opts):
             focused = self.s.focus == f"field:{opt.key}"
             box = self.s.fields.get(opt.key, LineEdit())
-            out.append(f"{opt.name}:".ljust(label_w), self.style_of("fields--focused" if focused else "fields--label"))
-            out.append_text(_edit_text(box, self.size.width - label_w, focused, f"<{opt.metavar}>"))
+            out.append(f"{opt.name}:".ljust(label_w), style("accent" if focused else "label"))
+            out.append_text(_edit_text(box, self.size.width - label_w, focused, f"<{opt.metavar}>", kind="value"))
             if i < len(opts) - 1:
                 out.append("\n")
         return out
@@ -139,27 +161,21 @@ class FieldsView(SessionView):
 
 
 class RowList(SessionView):
-    """A scrolled list whose items can span several lines (wrapped text)."""
+    """A scrolled list whose items can span several lines (wrapped, coloured text)."""
 
-    COMPONENT_CLASSES = {"list--cursor", "list--checked", "list--dim"}
     DEFAULT_CSS = """
-    RowList { height: 1fr; border: round $foreground 25%; border-title-color: $foreground;
-               border-title-style: bold; border-subtitle-color: $text-muted; }
-    RowList.-focused { border: round $accent; }
-    RowList.-searching { border-subtitle-color: $accent; }
-    RowList > .list--cursor { background: $accent 35%; text-style: bold; }
-    RowList > .list--checked { color: $success; text-style: bold; }
-    RowList > .list--dim { color: $text-muted; }
+    RowList { height: 1fr; border: round $foreground 25%; border-title-color: $secondary;
+              border-title-style: bold; border-subtitle-color: $text-muted; }
+    RowList.-focused { border: round $accent; border-title-color: $accent; }
+    RowList.-searching { border-subtitle-color: $warning; }
     """
     row_map: list[int]
 
-    def rows(self, width: int) -> list[list[str]]: ...
+    def rows(self, width: int) -> list[list[list[Segment]]]: ...
     def index(self) -> int: ...
     def set_index(self, i: int) -> None: ...
     def get_scroll(self) -> int: ...
     def set_scroll(self, v: int) -> None: ...
-    def is_checked(self, i: int) -> bool:
-        return False
     def show_cursor(self) -> bool:
         return True
     def empty_message(self) -> str: ...
@@ -173,20 +189,18 @@ class RowList(SessionView):
         out = Text()
         cursor = self.index() if self.show_cursor() else None
         for i in range(self.get_scroll(), len(rows)):
-            style = Style()
-            if self.is_checked(i):
-                style += self.style_of("list--checked")
-            if i == cursor:
-                style += self.style_of("list--cursor")
             for line in rows[i]:
                 if len(self.row_map) >= h:
                     break
                 if self.row_map:
                     out.append("\n")
-                out.append(line.ljust(w) if i == cursor else line, style)
+                is_cursor = i == cursor
+                out.append_text(segments_text(line, is_cursor))
+                if is_cursor:
+                    out.append(" " * max(0, w - sum(len(t) for t, _ in line)), CURSOR)
                 self.row_map.append(i)
         if not rows:
-            out.append("  " + self.empty_message(), self.style_of("list--dim"))
+            out.append("  " + self.empty_message(), style("dim"))
         return out
 
     def on_click(self, event: events.Click) -> None:
@@ -209,11 +223,11 @@ class RowList(SessionView):
 
 
 class OptionsView(RowList):
-    def rows(self, width: int) -> list[list[str]]:
+    def rows(self, width: int) -> list[list[list[Segment]]]:
         items = self.s.filtered()
         occs = self.s.occurrences()
         spec_w = spec_width(items, width)
-        return [option_lines(o, o.key in occs, spec_w, width) for o in items]
+        return [option_segments(o, o.key in occs, spec_w, width, self.s.query) for o in items]
 
     def index(self) -> int:
         return self.s.list_index
@@ -226,9 +240,6 @@ class OptionsView(RowList):
 
     def set_scroll(self, v: int) -> None:
         self.s.list_scroll = v
-
-    def is_checked(self, i: int) -> bool:
-        return self.s.filtered()[i].key in self.s.occurrences()
 
     def show_cursor(self) -> bool:
         return self.s.focus == "list"
@@ -250,8 +261,8 @@ class OptionsView(RowList):
 
 
 class HistoryView(RowList):
-    def rows(self, width: int) -> list[list[str]]:
-        return [history_lines(e, width) for e in self.s.hist_filtered()]
+    def rows(self, width: int) -> list[list[list[Segment]]]:
+        return [history_segments(e, width, self.s.hist_query) for e in self.s.hist_filtered()]
 
     def index(self) -> int:
         return self.s.hist_index
@@ -278,12 +289,9 @@ class HistoryView(RowList):
 
 
 class HelpView(SessionView):
-    COMPONENT_CLASSES = {"help--section", "help--key"}
     DEFAULT_CSS = """
-    HelpView { height: 1fr; border: round $accent; border-title-style: bold;
+    HelpView { height: 1fr; border: round $accent; border-title-color: $accent; border-title-style: bold;
                border-subtitle-color: $text-muted; }
-    HelpView > .help--section { color: $accent; text-style: bold; }
-    HelpView > .help--key { color: $warning; text-style: bold; }
     """
 
     def on_mount(self) -> None:
@@ -304,9 +312,9 @@ class HelpView(SessionView):
             if i:
                 out.append("\n")
             if kind == "section":
-                out.append(text, self.style_of("help--section"))
+                out.append(text, style("section"))
             elif kind == "key":
-                out.append(text[:key_end], self.style_of("help--key"))
+                out.append(text[:key_end], style("key"))
                 out.append(text[key_end:])
             else:
                 out.append(text)
@@ -321,6 +329,16 @@ class HelpView(SessionView):
         self.refresh()
 
 
+def keybar_text(s: Session) -> Text:
+    out = Text()
+    for n, (key, desc) in enumerate(key_hints(s)):
+        if n:
+            out.append(" · ", style("dim"))
+        out.append(key, style("key"))
+        out.append(f" {desc}", style("dim"))
+    return out
+
+
 class HptuiApp(App):
     ENABLE_COMMAND_PALETTE = False  # it would steal ^P, which hptui uses
     BINDINGS = [
@@ -329,10 +347,10 @@ class HptuiApp(App):
     ]
     CSS = """
     Screen { layout: vertical; }
-    #title { height: 1; background: $primary; color: $text; text-style: bold; padding: 0 1; }
+    #title { height: 1; background: $panel; padding: 0 0; }
     #status { height: 1; color: $text-muted; padding: 0 1; }
     #status.-message { color: $accent; }
-    #keys { height: 1; background: $panel; color: $text-muted; padding: 0 1; }
+    #keys { height: 1; background: $panel; padding: 0 1; }
     """
 
     def __init__(self, session: Session, title: str) -> None:
@@ -341,7 +359,7 @@ class HptuiApp(App):
         self.title_text = title
 
     def compose(self) -> ComposeResult:
-        yield Static(f"hptui · {self.title_text}", id="title")
+        yield Static(segments_text(title_segments(self.title_text)), id="title")
         yield CommandBox()
         yield FieldsView()
         yield OptionsView()
@@ -351,6 +369,7 @@ class HptuiApp(App):
         yield Static("", id="keys")
 
     def on_mount(self) -> None:
+        self.theme = "dracula"
         self.sync()
 
     def on_key(self, event: events.Key) -> None:
@@ -365,7 +384,7 @@ class HptuiApp(App):
     def on_paste(self, event: events.Paste) -> None:
         s = self.session
         typing = s.hist_searching if s.hist_open else (s.focus != "list" or s.searching)
-        if not typing:
+        if not typing or s.help_open:
             return
         for ch in event.text.replace("\r", "").replace("\n", " "):
             if ch.isprintable():
@@ -412,7 +431,7 @@ class HptuiApp(App):
         status = self.query_one("#status", Static)
         status.update(s.message or (history_status(s) if s.hist_open and not s.help_open else ""))
         status.set_class(bool(s.message), "-message")
-        self.query_one("#keys", Static).update(key_hints(s))
+        self.query_one("#keys", Static).update(keybar_text(s))
 
         for w in (cmd, fields, options, hist, help_view):
             w.refresh()

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import curses
 import os
+import re
 import textwrap
 from dataclasses import dataclass, field
 
@@ -614,22 +615,135 @@ def help_lines(w: int) -> list[tuple[str, str, int]]:
     return out
 
 
-def key_hints(s: Session) -> str:
+def key_hints(s: Session) -> list[tuple[str, str]]:
+    """(key, what it does) pairs for the bottom bar."""
     if s.help_open:
-        return "j/k scroll · esc / q / ? close"
+        return [("j/k", "scroll"), ("esc / q / ?", "close")]
     if s.hist_open:
         if s.hist_searching:
-            return "type to filter · ↑↓ move · enter edit · ^S use as-is · esc stop"
-        edit = "enter edit (opens options)" if s.standalone else "enter edit"
-        back = "quit" if s.standalone else "back"
-        return f"j/k move · {edit} · r use as-is · d delete · / search · ? help · esc {back}"
+            return [("type", "to filter"), ("↑↓", "move"), ("enter", "edit"), ("^S", "use as-is"), ("esc", "stop")]
+        return [("j/k", "move"), ("enter", "edit (opens options)" if s.standalone else "edit"),
+                ("r", "use as-is"), ("d", "delete"), ("/", "search"), ("?", "help"),
+                ("esc", "quit" if s.standalone else "back")]
     if s.focus == "list":
         if s.searching:
-            return "type to filter · ↑↓ move · enter pick · esc browse results"
-        return "j/k move · space toggle · l edit · / search · ^P command · ^S done · ? help"
+            return [("type", "to filter"), ("↑↓", "move"), ("enter", "pick"), ("esc", "browse results")]
+        return [("j/k", "move"), ("space", "toggle"), ("l", "edit"), ("/", "search"),
+                ("^P", "command"), ("^S", "done"), ("?", "help")]
     if s.focus == "cmd":
-        return "enter done · ^P options · tab/↓ next · esc back to list"
-    return "enter set value · esc discard · tab/↑↓ move · ^P command · ^S done"
+        return [("enter", "done"), ("^P", "options"), ("tab/↓", "next"), ("esc", "back to list")]
+    return [("enter", "set value"), ("esc", "discard"), ("tab/↑↓", "move"), ("^P", "command"), ("^S", "done")]
+
+
+# ---- colour: frontend-neutral "kinds" that each frontend maps to a style ----------
+#
+# program  first word of a command      flag     -n, --name
+# punct    = and , separators           value    an option's value
+# string   quoted text                  arg      positional argument
+# op       | && ; > and friends         metavar  STRING in "--name=STRING"
+# check    [x]                          uncheck  [ ]
+# match    search hit                   time     "5m ago"
+# title    "hptui" in the title bar     ""       plain text
+
+Segment = tuple[str, str]  # (text, kind)
+_SHELL_OPS = {"|", "||", "&&", ";", "&", ">", ">>", "<", "2>", "2>&1", "&>", "|&"}
+_FLAG_RE = re.compile(r"--?[A-Za-z0-9?#@][\w.+#@-]*")
+
+
+def runs(text: str, kinds: list[str]) -> list[Segment]:
+    """Group per-character kinds into (text, kind) segments."""
+    out: list[Segment] = []
+    for ch, kind in zip(text, kinds):
+        if out and out[-1][1] == kind:
+            out[-1] = (out[-1][0] + ch, kind)
+        else:
+            out.append((ch, kind))
+    return out
+
+
+def command_kinds(text: str, options: list[Option]) -> list[str]:
+    """A kind for every character of a command line (syntax highlighting)."""
+    kinds = [""] * len(text)
+
+    def paint(a: int, b: int, kind: str) -> None:
+        kinds[a:b] = [kind] * (b - a)
+
+    after_op = True  # the first word, and the word after | && ; etc., is a program
+    for tok in cmdline.tokenize(text):
+        raw = tok.raw
+        if raw in _SHELL_OPS:
+            paint(tok.start, tok.end, "op")
+            after_op = True
+            continue
+        if after_op:
+            paint(tok.start, tok.end, "program")
+            after_op = False
+        elif raw.startswith("-") and len(raw) > 1:
+            eq = raw.find("=")
+            if eq > 1:
+                paint(tok.start, tok.start + eq, "flag")
+                paint(tok.start + eq, tok.start + eq + 1, "punct")
+                paint(tok.start + eq + 1, tok.end, "string" if raw[eq + 1:eq + 2] in ("'", '"') else "value")
+            else:
+                paint(tok.start, tok.end, "flag")
+        else:
+            paint(tok.start, tok.end, "string" if raw[:1] in ("'", '"') or '"' in raw else "arg")
+    # values of known options (e.g. the FILE in "-o FILE") are values, not positional args
+    for occ in cmdline.find_occurrences(text, options):
+        if occ.value_start is not None and occ.style in ("sep", "attached"):
+            raw = text[occ.value_start:occ.value_end]
+            paint(occ.value_start, occ.value_end, "string" if raw[:1] in ("'", '"') else "value")
+    return kinds
+
+
+def _mark_matches(line: str, kinds: list[str], query: str) -> None:
+    if not query:
+        return
+    low, q = line.lower(), query.lower()
+    i = low.find(q)
+    while i != -1:
+        kinds[i:i + len(q)] = ["match"] * len(q)
+        i = low.find(q, i + len(q))
+
+
+def option_segments(opt: Option, checked: bool, spec_w: int, w: int, query: str = "") -> list[list[Segment]]:
+    """option_lines() with colour: checkbox, flags vs. metavars, and search hits."""
+    lines = option_lines(opt, checked, spec_w, w)
+    out = []
+    for n, line in enumerate(lines):
+        kinds = [""] * len(line)
+        if n == 0:
+            kinds[1:4] = ["check" if checked else "uncheck"] * 3
+            start = 5  # after " [x] "
+            for j, ch in enumerate(opt.spec):
+                kinds[start + j] = "punct" if ch in ",|=" else ("" if ch == " " else "metavar")
+            for m in _FLAG_RE.finditer(opt.spec):
+                kinds[start + m.start():start + m.end()] = ["flag"] * (m.end() - m.start())
+        _mark_matches(line, kinds, query)
+        out.append(runs(line, kinds))
+    return out
+
+
+def history_segments(entry: history.Entry, w: int, query: str = "") -> list[list[Segment]]:
+    """history_lines() with the command syntax-highlighted."""
+    lines = history_lines(entry, w)
+    ckinds = command_kinds(entry.command, [])
+    out, pos = [], 0
+    for n, line in enumerate(lines):
+        body = line[HISTORY_INDENT:]
+        kinds = ["time"] * HISTORY_INDENT + ckinds[pos:pos + len(body)]
+        kinds += [""] * (len(line) - len(kinds))
+        pos += len(body)
+        body_kinds = kinds[HISTORY_INDENT:]
+        _mark_matches(line[HISTORY_INDENT:], body_kinds, query)
+        kinds = kinds[:HISTORY_INDENT] + body_kinds
+        out.append(runs(line, kinds))
+    return out
+
+
+def title_segments(title: str) -> list[Segment]:
+    """ "hptui", then the program name."""
+    return [(" ", ""), ("hptui", "title"), ("  ·  ", "punct"), (title, "program"), (" ", "")]
 
 
 def new_session(
