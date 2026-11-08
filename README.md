@@ -1,4 +1,4 @@
-# hptui
+# hptui: AI-Slop interactive cli helper
 
 Turn any program's `--help` output into an interactive command builder.
 
