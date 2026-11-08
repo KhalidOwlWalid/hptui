@@ -52,6 +52,25 @@ Differences from Linux:
 - Help text is parsed for `-x` / `--long` style options; Windows-style `/X`
   switches aren't recognised.
 
+## Standalone executable
+
+`hptui.exe` bundles Python and every dependency into one file, so it runs on a
+Windows machine with nothing else installed. Put it anywhere on your `PATH`.
+
+Build it on Windows (PyInstaller can't cross-compile):
+
+```powershell
+uv run --group build python scripts/build_exe.py   # -> dist\hptui.exe
+```
+
+The same command on Linux produces a `dist/hptui` binary. On GitHub, the
+`build` workflow builds the `.exe` on demand (Actions tab -> build -> Run
+workflow) and attaches it to a release when you push a version tag
+(`git tag v0.1.0 && git push --tags`).
+
+The single-file build unpacks itself on each launch, so it starts a little
+slower (about 0.35s) than the `uv tool install` version.
+
 ## Frontends
 
 hptui has two interchangeable frontends with the same keys and behaviour:
@@ -97,10 +116,12 @@ The option list uses vim-style keys. Arrow keys work everywhere too.
 | search       | `Enter`                     | pick the match, clear the search, edit value    |
 | search       | `Esc`                       | stop typing but keep results to browse with j/k |
 | option list  | `H` (or `Ctrl-R` anywhere)  | open this program's command history             |
+| option list  | `E`                         | open the examples from the help page            |
 | history      | `j`/`k`, `g`/`G`, `/`       | move, jump, search (same as the option list)    |
 | history      | `Enter` / `l`               | load the command into the box to tweak it       |
 | history      | `r` / `Ctrl-S`              | run the command as-is                           |
 | history      | `d`                         | delete the entry                                |
+| history      | `H` / `E`                   | switch between history and examples             |
 | history      | `Esc` / `q` / `h`           | back to the options                             |
 | value box    | `Enter`                     | write the value into the command                |
 | value box    | `Esc`                       | discard the edit                                |
@@ -110,6 +131,13 @@ The option list uses vim-style keys. Arrow keys work everywhere too.
 The command box is the source of truth: you can type options straight into
 it and the checkboxes and value boxes follow. Values with spaces or special
 characters are quoted automatically (`--output="my file"`, `~/"My Docs"`).
+
+## Examples
+
+If the help page has an "Examples:" section (like `tar --help`), press `E` to
+pick one; it loads into the command box with its options ticked, ready to tweak.
+`hptui --examples tar` opens straight into them. Descriptions come from inline
+`# comments` or the line above each command.
 
 ## History
 

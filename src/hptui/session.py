@@ -12,7 +12,7 @@ import textwrap
 from dataclasses import dataclass, field
 
 from . import cmdline, history, keys
-from .parser import Option
+from .parser import Example, Option
 
 # Raw-mode control characters.
 CTRL_A, CTRL_C, CTRL_D, CTRL_E, CTRL_K, CTRL_N = "\x01", "\x03", "\x04", "\x05", "\x0b", "\x0e"
@@ -112,6 +112,9 @@ class Session:
     help_open: bool = False
     help_scroll: int = 0
     edit_request: str | None = None  # standalone: command the user wants to edit
+    # the same picker panel also lists examples parsed from the help page
+    examples: list[Example] = field(default_factory=list)
+    hist_kind: str = "history"  # "history" | "examples"
 
     # ---- derived state -------------------------------------------------
 
@@ -309,6 +312,8 @@ class Session:
             self.cmd.cursor = len(self.cmd.text)
         elif key == "H":
             self.open_history()
+        elif key == "E":
+            self.open_examples()
         elif key == "?":
             self.open_help()
         elif key == "q":
@@ -345,14 +350,21 @@ class Session:
 
     # ---- history panel -----------------------------------------------------
 
-    def hist_filtered(self) -> list[history.Entry]:
+    def hist_filtered(self) -> list:
         q = self.hist_query.lower()
-        return [e for e in self.hist_entries if q in e.command.lower()]
+        return [e for e in self.hist_entries
+                if q in f"{e.command} {getattr(e, 'description', '')}".lower()]
+
+    def _open_picker(self, kind: str, entries: list) -> None:
+        self.commit_field()
+        self.hist_kind, self.hist_entries = kind, entries
+        self.hist_open, self.hist_index, self.hist_query, self.hist_searching = True, 0, "", False
 
     def open_history(self) -> None:
-        self.commit_field()
-        self.hist_entries = history.load(self.program or None)
-        self.hist_open, self.hist_index, self.hist_query, self.hist_searching = True, 0, "", False
+        self._open_picker("history", history.load(self.program or None))
+
+    def open_examples(self) -> None:
+        self._open_picker("examples", list(self.examples))
 
     def close_history(self) -> None:
         if self.standalone:
@@ -416,9 +428,12 @@ class Session:
         elif key == "r" and current:
             self.replay(current)
         elif key == "d" and current:
-            history.delete(current.command)
-            self.hist_entries.remove(current)
-            self.message = "deleted from history"
+            if self.hist_kind != "history":
+                self.message = "examples come from the help page and can't be deleted"
+            else:
+                history.delete(current.command)
+                self.hist_entries.remove(current)
+                self.message = "deleted from history"
         elif key in ("g", keys.KEY_HOME):
             self.hist_index = 0
         elif key in ("G", keys.KEY_END):
@@ -430,7 +445,11 @@ class Session:
             self.open_help()
         elif key == ESC and self.hist_query:
             self.hist_query = ""
-        elif key in (ESC, "q", "h", "H", CTRL_R):
+        elif key in ("H", CTRL_R) and self.hist_kind != "history" and not self.standalone:
+            self.open_history()  # switch from examples to history
+        elif key == "E" and self.hist_kind != "examples" and not self.standalone:
+            self.open_examples()  # switch from history to examples
+        elif key in (ESC, "q", "h", "H", "E", CTRL_R):
             self.close_history()
         self.hist_index = max(0, min(self.hist_index, len(self.hist_filtered()) - 1))
 
@@ -515,7 +534,10 @@ def options_header(s: Session) -> tuple[str, str]:
 
 
 def history_header(s: Session) -> tuple[str, str]:
-    header = f"History · {s.program or 'all programs'} ({len(s.hist_filtered())})"
+    if s.hist_kind == "examples":
+        header = f"Examples · {s.program or 'help'} ({len(s.hist_filtered())})"
+    else:
+        header = f"History · {s.program or 'all programs'} ({len(s.hist_filtered())})"
     if s.hist_searching:
         return header, f"/{s.hist_query}"
     if s.hist_query:
@@ -526,12 +548,14 @@ def history_header(s: Session) -> tuple[str, str]:
 def history_empty_message(s: Session) -> str:
     if s.hist_query:
         return "no matches"
+    if s.hist_kind == "examples":
+        return "this help page has no examples section"
     return f"no history yet for {s.program}" if s.program else "no history yet"
 
 
 def history_status(s: Session) -> str:
     items = s.hist_filtered()
-    if not items:
+    if not items or s.hist_kind != "history":
         return ""
     cwd = items[s.hist_index].cwd.replace(os.path.expanduser("~"), "~", 1)
     return f"ran in {cwd}" if cwd else ""
@@ -555,6 +579,7 @@ HELP: list[tuple[str, list[tuple[str, str]]]] = [
         ("/", "search"),
         ("i / a", "edit the command box"),
         ("H", "history"),
+        ("E", "examples from the help page (if it has any)"),
         ("Esc", "clear the search filter"),
         ("?", "this help"),
         ("q", "quit without output"),
@@ -576,11 +601,12 @@ HELP: list[tuple[str, list[tuple[str, str]]]] = [
         ("Ctrl-A / Ctrl-E", "start / end of line"),
         ("Ctrl-W / Ctrl-U / Ctrl-K", "delete word / to start / to end"),
     ]),
-    ("History", [
+    ("History and examples", [
         ("j / k, g / G", "move, first / last"),
         ("Enter / l", "load the command to edit it"),
         ("r / Ctrl-S", "use the command as-is"),
-        ("d", "delete the entry"),
+        ("d", "delete the entry (history only)"),
+        ("H / E", "switch between history and examples"),
         ("/", "search"),
         ("?", "this help"),
         ("Esc / q / h", "back to the options"),
@@ -621,14 +647,21 @@ def key_hints(s: Session) -> list[tuple[str, str]]:
     if s.hist_open:
         if s.hist_searching:
             return [("type", "to filter"), ("↑↓", "move"), ("enter", "edit"), ("^S", "use as-is"), ("esc", "stop")]
-        return [("j/k", "move"), ("enter", "edit (opens options)" if s.standalone else "edit"),
-                ("r", "use as-is"), ("d", "delete"), ("/", "search"), ("?", "help"),
-                ("esc", "quit" if s.standalone else "back")]
+        if s.hist_kind == "examples":
+            return [("j/k", "move"), ("enter", "edit"), ("r", "use as-is"), ("/", "search"),
+                    ("H", "history"), ("?", "help"), ("esc", "back")]
+        hints = [("j/k", "move"), ("enter", "edit (opens options)" if s.standalone else "edit"),
+                 ("r", "use as-is"), ("d", "delete"), ("/", "search")]
+        if s.examples and not s.standalone:
+            hints.append(("E", "examples"))
+        return hints + [("?", "help"), ("esc", "quit" if s.standalone else "back")]
     if s.focus == "list":
         if s.searching:
             return [("type", "to filter"), ("↑↓", "move"), ("enter", "pick"), ("esc", "browse results")]
-        return [("j/k", "move"), ("space", "toggle"), ("l", "edit"), ("/", "search"),
-                ("^P", "command"), ("^S", "done"), ("?", "help")]
+        hints = [("j/k", "move"), ("space", "toggle"), ("l", "edit"), ("/", "search"), ("^P", "command")]
+        if s.examples:
+            hints.append(("E", f"examples ({len(s.examples)})"))
+        return hints + [("^S", "done"), ("?", "help")]
     if s.focus == "cmd":
         return [("enter", "done"), ("^P", "options"), ("tab/↓", "next"), ("esc", "back to list")]
     return [("enter", "set value"), ("esc", "discard"), ("tab/↑↓", "move"), ("^P", "command"), ("^S", "done")]
@@ -689,7 +722,7 @@ def command_kinds(text: str, options: list[Option]) -> list[str]:
             paint(tok.start, tok.end, "string" if raw[:1] in ("'", '"') or '"' in raw else "arg")
     # values of known options (e.g. the FILE in "-o FILE") are values, not positional args
     for occ in cmdline.find_occurrences(text, options):
-        if occ.value_start is not None and occ.style in ("sep", "attached"):
+        if occ.value_start is not None and occ.style in ("sep", "attached", "cluster_value"):
             raw = text[occ.value_start:occ.value_end]
             paint(occ.value_start, occ.value_end, "string" if raw[:1] in ("'", '"') else "value")
     return kinds
@@ -723,8 +756,26 @@ def option_segments(opt: Option, checked: bool, spec_w: int, w: int, query: str 
     return out
 
 
-def history_segments(entry: history.Entry, w: int, query: str = "") -> list[list[Segment]]:
-    """history_lines() with the command syntax-highlighted."""
+def example_segments(ex: Example, w: int, query: str = "") -> list[list[Segment]]:
+    """An example: the command (highlighted, wrapped) with its description below."""
+    out: list[list[Segment]] = []
+    ckinds, pos = command_kinds(ex.command, []), 0
+    for line in textwrap.wrap(ex.command, max(10, w - 3), break_on_hyphens=False, drop_whitespace=False) or [""]:
+        kinds = ckinds[pos:pos + len(line)]
+        pos += len(line)
+        _mark_matches(line, kinds, query)
+        out.append([("  ", "")] + runs(line, kinds))
+    for line in wrap(ex.description, w - 5) if ex.description else []:
+        kinds = ["dim"] * len(line)
+        _mark_matches(line, kinds, query)
+        out.append([("    ", "")] + runs(line, kinds))
+    return out
+
+
+def history_segments(entry, w: int, query: str = "") -> list[list[Segment]]:
+    """history_lines() with the command syntax-highlighted (examples get their own layout)."""
+    if isinstance(entry, Example):
+        return example_segments(entry, w, query)
     lines = history_lines(entry, w)
     ckinds = command_kinds(entry.command, [])
     out, pos = [], 0
@@ -751,12 +802,16 @@ def new_session(
     *,
     program: str | None = None,
     open_history: bool = False,
+    open_examples: bool = False,
     standalone: bool = False,
+    examples: list[Example] | None = None,
 ) -> Session:
-    s = Session(options=options, cmd=LineEdit(), standalone=standalone)
+    s = Session(options=options, cmd=LineEdit(), standalone=standalone, examples=examples or [])
     s.program = history.program_of(command) if program is None else program
     s.cmd.set(command.rstrip() + " " if command else "")
     s.sync_fields()
     if open_history or standalone:
         s.open_history()
+    elif open_examples:
+        s.open_examples()
     return s

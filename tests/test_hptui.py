@@ -104,3 +104,45 @@ def test_optional_value():
 
 def test_options_after_double_dash_ignored():
     assert "--name" not in occurrences_by_key("help2man -- --name=x", OPTS)
+
+
+def test_parse_examples():
+    from hptui.parser import parse_examples
+
+    text = """Usage: mytool [OPTIONS]
+
+Examples:
+  mytool -cf archive.tar foo bar  # Create archive.tar from foo and bar.
+  # Convert a file
+  $ mytool --in a.txt --out "b c.txt"
+
+  Show the version:
+      mytool --version
+  This sentence mentions mytool but is prose.
+
+ Main options:
+  -v, --verbose   be loud
+  mytool --not-an-example   (after the section ended)
+"""
+    got = [(e.command, e.description) for e in parse_examples(text, "mytool")]
+    assert got == [
+        ("mytool -cf archive.tar foo bar", "Create archive.tar from foo and bar."),
+        ('mytool --in a.txt --out "b c.txt"', "Convert a file"),
+        ("mytool --version", "Show the version"),
+    ]
+    assert parse_examples("Usage: x\n -v  verbose\n", "x") == []
+
+
+def test_cluster_ending_in_value_option():
+    # getopt style, like `tar -tvf archive.tar`
+    occ = occurrences_by_key("help2man -Nlf in.txt prog", OPTS)
+    assert "--no-info" in occ and "--libtool" in occ and occ["-f"].value == "in.txt"
+    assert occurrences_by_key("help2man -Nlfin.txt", OPTS)["-f"].value == "in.txt"
+
+    assert set_value("help2man -Nlf in.txt prog", BY["f"], "my file", OPTS) == 'help2man -Nlf "my file" prog'
+    assert set_value("help2man -Nlfin.txt", BY["f"], "x", OPTS) == "help2man -Nlfx"
+    assert set_value("help2man -Nlf", BY["f"], "x", OPTS) == "help2man -Nlf x"
+
+    assert remove_option("help2man -Nlf in.txt prog", BY["f"], OPTS) == "help2man -Nl prog"
+    assert remove_option("help2man -Nlf in.txt prog", BY["no-info"], OPTS) == "help2man -lf in.txt prog"
+    assert remove_option("help2man -fin.txt", BY["f"], OPTS) == "help2man"

@@ -10,7 +10,7 @@ import sys
 
 from . import compat, config, history, keys
 from .cmdline import quote
-from .parser import guess_command, parse_help
+from .parser import guess_command, parse_examples, parse_help
 
 __all__ = ["main"]
 
@@ -27,6 +27,7 @@ def _build_argparser() -> argparse.ArgumentParser:
             '  eval "$(hptui help2man)"          run it in the current shell (output captured, so it prints)\n'
             "  hptui --history                   pick a past command from any program\n"
             "  hptui --history help2man          start in help2man's history\n"
+            "  hptui --examples tar              start in the examples from `tar --help`\n"
             "  hptui --frontend=textual          switch to the Textual frontend (remembered)"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -39,6 +40,7 @@ def _build_argparser() -> argparse.ArgumentParser:
     mode.add_argument("-p", "--print", action="store_true",
                       help="always print the command instead of running it (default when output is captured)")
     p.add_argument("-H", "--history", action="store_true", help="start in the command history (all programs if none given)")
+    p.add_argument("-E", "--examples", action="store_true", help="start in the examples from the help page")
     p.add_argument(
         "--frontend", choices=config.FRONTENDS,
         help="UI to use, remembered for future runs (default: curses). "
@@ -126,10 +128,12 @@ def main() -> None:
         try:
             from .cmdline import tokenize
 
-            options = parse_help(_run_help([tokenize(command)[0].value]))
+            help_text = _run_help([tokenize(command)[0].value])
         except SystemExit:
-            options = []  # program gone or no help: still let them edit the text
-        app = _run_on_tty(lambda: run(options, command))
+            help_text = ""  # program gone or no help: still let them edit the text
+        options = parse_help(help_text)
+        examples = parse_examples(help_text, history.program_of(command))
+        app = _run_on_tty(lambda: run(options, command, examples=examples))
         return _finish(app.result, run_it)
 
     text = _read_help(args.program)
@@ -138,5 +142,7 @@ def main() -> None:
         raise SystemExit("hptui: no options found in the help text")
 
     command = args.command or " ".join(quote(a) for a in args.program) or guess_command(text) or "command"
-    app = _run_on_tty(lambda: run(options, command, open_history=args.history))
+    examples = parse_examples(text, history.program_of(command))
+    app = _run_on_tty(lambda: run(options, command, open_history=args.history,
+                                  open_examples=args.examples, examples=examples))
     _finish(app.result, run_it)

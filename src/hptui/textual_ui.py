@@ -444,9 +444,12 @@ def run(
     *,
     program: str | None = None,
     open_history: bool = False,
+    open_examples: bool = False,
     standalone: bool = False,
+    examples: list | None = None,
 ) -> Session:
     """Show the Textual TUI. The returned session's .result is the final command (None if cancelled)."""
-    s = new_session(options, command, program=program, open_history=open_history, standalone=standalone)
+    s = new_session(options, command, program=program, open_history=open_history,
+                    open_examples=open_examples, standalone=standalone, examples=examples)
     HptuiApp(s, title or command or "history").run()
     return s

@@ -138,3 +138,71 @@ def guess_command(text: str) -> str | None:
         if m:
             return os.path.basename(m.group(1).strip("`'\""))
     return None
+
+
+@dataclass
+class Example:
+    command: str
+    description: str = ""
+
+
+_EXAMPLES_RE = re.compile(r"^\s*(?:usage\s+)?examples?(?:\s+of\s+use)?\s*:?\s*$", re.IGNORECASE)
+_PROMPT_RE = re.compile(r"^[$%>]\s+")
+_INLINE_COMMENT_RE = re.compile(r"\s+#\s+")
+
+
+def parse_examples(text: str, program: str | None = None) -> list[Example]:
+    """Commands listed under "Examples:" headings.
+
+    Only lines that start with the program's name (optionally after a "$ "
+    prompt) count, so surrounding prose is never mistaken for a command. A
+    description comes from an inline "# comment", or from the line just above
+    (a "# comment" line or a "Do something:" line).
+    """
+    from . import compat
+
+    prog = compat.program_name(program) if program else None
+    examples: list[Example] = []
+    seen: set[str] = set()
+    in_section, header_indent, pending = False, 0, ""
+
+    def as_command(line: str) -> str | None:
+        body = _PROMPT_RE.sub("", line)
+        prompted = body != line
+        first = body.split(maxsplit=1)[0] if body else ""
+        if (prog and compat.program_name(first) == prog) or (prompted and not prog):
+            return body
+        return None
+
+    for raw in text.expandtabs(8).splitlines():
+        stripped = raw.strip()
+        if _EXAMPLES_RE.match(raw):
+            in_section, header_indent, pending = True, _indent(raw), ""
+            continue
+        if not in_section:
+            continue
+        if not stripped:
+            pending = ""
+            continue
+        command = as_command(stripped)
+        if command is None:
+            # An option list or a new "Section:" heading ends the examples.
+            if stripped.startswith("-") or (stripped.endswith(":") and _indent(raw) <= header_indent + 1
+                                            and not stripped.startswith("#")):
+                in_section = False
+            elif stripped.startswith("#"):
+                pending = stripped.lstrip("#").strip()
+            elif stripped.endswith(":"):
+                pending = stripped[:-1].strip()
+            continue
+        description = pending
+        parts = _INLINE_COMMENT_RE.split(command, maxsplit=1)
+        if len(parts) == 2:
+            command, description = parts[0].rstrip(), parts[1].strip()
+        if command.endswith(".") and len(command) > 1 and not command[-2].isspace():
+            command = command[:-1]  # sentence full stop, not part of the command
+        pending = ""
+        if command not in seen:
+            seen.add(command)
+            examples.append(Example(command, description))
+    return examples

@@ -25,7 +25,7 @@ class Token:
 @dataclass
 class Occurrence:
     option: Option
-    style: str  # "flag" | "eq" | "sep" | "attached" | "cluster"
+    style: str  # "flag" | "eq" | "sep" | "attached" | "cluster" | "cluster_value"
     start: int  # span of the whole occurrence (flag + separate value token)
     end: int
     flag_end: int  # end of the flag token
@@ -215,13 +215,31 @@ def find_occurrences(text: str, options: list[Option]) -> list[Occurrence]:
                     opt, "attached", tok.start, tok.end, tok.end, t[2:], tok.start + 2, tok.end,
                 ))
                 continue
-            letters = [amap.get("-" + c) for c in t[1:]]
-            if tok.raw == t and all(o is not None and not o.takes_value for o in letters):
-                # -abc  ==  -a -b -c
-                for k, o in enumerate(letters, start=1):
-                    found.append(Occurrence(
-                        o, "cluster", tok.start, tok.end, tok.end, cluster_pos=tok.start + k,
-                    ))
+            if tok.raw != t:
+                continue  # quoted text, not a cluster of flags
+            # getopt rules: -abc == -a -b -c, and a letter that takes a value
+            # consumes the rest of the token (-tvfFILE) or the next one (-tvf FILE).
+            cluster: list[Occurrence] = []
+            for k in range(1, len(t)):
+                o = amap.get("-" + t[k])
+                if o is None:
+                    cluster = []
+                    break
+                pos = tok.start + k
+                if o.takes_value and not o.optional_value:
+                    if k + 1 < len(t):
+                        cluster.append(Occurrence(o, "cluster_value", tok.start, tok.end, tok.end,
+                                                  t[k + 1:], pos + 1, tok.end, cluster_pos=pos))
+                    elif i < len(tokens) and not _looks_like_option(tokens[i]):
+                        val = tokens[i]
+                        i += 1
+                        cluster.append(Occurrence(o, "cluster_value", tok.start, val.end, tok.end,
+                                                  val.value, val.start, val.end, cluster_pos=pos))
+                    else:
+                        cluster.append(Occurrence(o, "cluster_value", tok.start, tok.end, tok.end, cluster_pos=pos))
+                    break
+                cluster.append(Occurrence(o, "cluster", tok.start, tok.end, tok.end, cluster_pos=pos))
+            found.extend(cluster)
     return found
 
 
@@ -268,7 +286,13 @@ def remove_option(text: str, opt: Option, options: list[Option] | None = None) -
     """Remove every occurrence of an option (and its value)."""
     occs = [o for o in find_occurrences(text, options or [opt]) if o.option is opt]
     for occ in sorted(occs, key=lambda o: (o.start, o.cluster_pos or 0), reverse=True):
-        if occ.style == "cluster":
+        if occ.style == "cluster_value" and occ.value_start is not None:
+            # drop the value first: it sits to the right, so the letter's position is unchanged
+            if occ.value_start >= occ.flag_end:
+                text = _cut(text, occ.value_start, occ.value_end)
+            else:
+                text = _splice(text, occ.value_start, occ.value_end, "")
+        if occ.style in ("cluster", "cluster_value"):
             text = _splice(text, occ.cluster_pos, occ.cluster_pos + 1, "")
             token_end = occ.start + 1
             if token_end >= len(text) or text[token_end].isspace():
@@ -299,6 +323,15 @@ def set_value(text: str, opt: Option, value: str, options: list[Option] | None =
         if value == "":
             return text
         return _splice(text, occ.flag_end, occ.flag_end, " " + quote(value))
+
+    if occ.style == "cluster_value":
+        if occ.value_start is None:
+            return text if value == "" else _splice(text, occ.flag_end, occ.flag_end, " " + quote(value))
+        if occ.value_start >= occ.flag_end:  # separate token: -tvf FILE
+            if value == "":
+                return _splice(text, occ.flag_end, occ.value_end, "")
+            return _splice(text, occ.value_start, occ.value_end, quote(value))
+        return _splice(text, occ.value_start, occ.value_end, quote(value) if value else "")  # -tvfFILE
 
     if occ.style == "attached":
         return _splice(text, occ.value_start, occ.value_end, quote(value) if value else "")
