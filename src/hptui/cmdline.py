@@ -7,6 +7,7 @@ by splicing the text so anything else the user typed is left alone.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 
@@ -34,8 +35,46 @@ class Occurrence:
     cluster_pos: int | None = None  # index of the letter inside a "-abc" cluster
 
 
-def tokenize(text: str) -> list[Token]:
-    """Split like a POSIX shell, keeping each token's position. Unclosed quotes run to the end."""
+# POSIX shells vs Windows: on Windows backslashes are path separators (only \" is an
+# escape) and single quotes are ordinary characters.
+POSIX = os.name != "nt"
+
+
+def _windows_token(text: str, i: int, buf: list[str]) -> int:
+    """Read one argument using the MSVCRT rules; returns the index after it.
+
+    Backslashes are literal unless they precede a quote: 2n backslashes + " give n
+    backslashes and a quote that opens/closes; 2n+1 give n backslashes and a literal ".
+    """
+    n, in_quotes = len(text), False
+    while i < n and (in_quotes or not text[i].isspace()):
+        c = text[i]
+        if c == "\\":
+            j = i
+            while j < n and text[j] == "\\":
+                j += 1
+            count = j - i
+            if j < n and text[j] == '"':
+                buf.append("\\" * (count // 2))
+                if count % 2:
+                    buf.append('"')
+                    j += 1
+            else:
+                buf.append("\\" * count)
+            i = j
+        elif c == '"':
+            in_quotes = not in_quotes
+            i += 1
+        else:
+            buf.append(c)
+            i += 1
+    return i
+
+
+def tokenize(text: str, posix: bool | None = None) -> list[Token]:
+    """Split like the platform's shell, keeping each token's position. Unclosed quotes run to the end."""
+    if posix is None:
+        posix = POSIX
     tokens: list[Token] = []
     i, n = 0, len(text)
     while i < n:
@@ -44,6 +83,10 @@ def tokenize(text: str) -> list[Token]:
         if i >= n:
             break
         start, buf = i, []
+        if not posix:
+            i = _windows_token(text, i, buf)
+            tokens.append(Token(text[start:i], "".join(buf), start, i))
+            continue
         while i < n and not text[i].isspace():
             c = text[i]
             if c == "'":
@@ -82,10 +125,28 @@ def _double_quote(v: str) -> str:
     return '"' + re.sub(r'([\\"$`])', r"\\\1", v) + '"'
 
 
-def quote(value: str) -> str:
+_WIN_SAFE_RE = re.compile(r"[\w@%+=:,./\\~-]+")
+
+
+def _windows_quote(v: str) -> str:
+    """Double-quote using the MSVCRT argv rules: backslashes only matter before a quote."""
+    out, backslashes = ['"'], 0
+    for ch in v:
+        if ch == "\\":
+            backslashes += 1
+            continue
+        out.append("\\" * (backslashes * 2 + 1) + '"' if ch == '"' else "\\" * backslashes + ch)
+        backslashes = 0
+    out.append("\\" * (backslashes * 2) + '"')
+    return "".join(out)
+
+
+def quote(value: str, posix: bool | None = None) -> str:
     """Quote a value for the shell, preferring double quotes and keeping a leading ~/ expandable."""
     if value == "":
         return '""'
+    if not (POSIX if posix is None else posix):
+        return value if _WIN_SAFE_RE.fullmatch(value) else _windows_quote(value)
     if _SAFE_RE.fullmatch(value):
         return value
     m = _TILDE_PREFIX_RE.fullmatch(value)

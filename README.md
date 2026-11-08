@@ -22,13 +22,35 @@ uv tool install .              # installs `hptui` into ~/.local/bin
 uv tool install --editable .   # same, but code changes apply without reinstalling
 ```
 
-Make sure `~/.local/bin` is on your `PATH` (`uv tool update-shell` adds it).
+Make sure uv's tool directory (`~/.local/bin`) is on your `PATH`; `uv tool update-shell` adds it on any OS.
 Then `hptui` works from any directory.
 
 ```shell
 uv tool upgrade hptui          # pick up changes after a normal (non-editable) install
 uv tool uninstall hptui        # remove it
 ```
+
+## Windows
+
+hptui runs on Windows 10/11; Windows Terminal is recommended for colours and
+Unicode. Installing it pulls in `windows-curses` automatically, and if curses is
+ever unavailable hptui falls back to the Textual frontend.
+
+```powershell
+uv tool install .
+git --help | hptui
+hptui git
+```
+
+Differences from Linux/macOS:
+
+- The finished command runs through `cmd.exe` (`%COMSPEC%`), and values are
+  quoted with Windows rules: double quotes only, and backslashes in paths are
+  left alone (`--output="C:\My Docs\out.txt"`).
+- History lives in `%LOCALAPPDATA%\hptui\history.jsonl` and settings in
+  `%APPDATA%\hptui\config.json`.
+- Help text is parsed for `-x` / `--long` style options; Windows-style `/X`
+  switches aren't recognised.
 
 ## Frontends
 

@@ -1,10 +1,12 @@
-"""Persistent settings, stored as JSON in ~/.config/hptui/config.json."""
+"""Persistent settings, stored as JSON in ~/.config/hptui/config.json (%APPDATA%\\hptui on Windows)."""
 
 from __future__ import annotations
 
 import json
 import os
 from pathlib import Path
+
+from . import compat
 
 FRONTENDS = ("curses", "textual")
 DEFAULTS = {"frontend": "curses"}
@@ -13,13 +15,12 @@ DEFAULTS = {"frontend": "curses"}
 def path() -> Path:
     if os.environ.get("HPTUI_CONFIG"):
         return Path(os.environ["HPTUI_CONFIG"])
-    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-    return Path(base) / "hptui" / "config.json"
+    return compat.config_dir() / "config.json"
 
 
 def load() -> dict:
     try:
-        data = json.loads(path().read_text())
+        data = json.loads(path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         data = {}
     if not isinstance(data, dict):
@@ -30,7 +31,7 @@ def load() -> dict:
 def save(**changes) -> None:
     p = path()
     try:
-        current = json.loads(p.read_text())
+        current = json.loads(p.read_text(encoding="utf-8"))
         if not isinstance(current, dict):
             current = {}
     except (OSError, ValueError):
@@ -38,5 +39,5 @@ def save(**changes) -> None:
     current.update(changes)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(current, indent=2) + "\n")
+    tmp.write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
     tmp.replace(p)

@@ -6,7 +6,6 @@ key and mouse events into the same keys the curses frontend sends.
 
 from __future__ import annotations
 
-import curses  # only for the KEY_* constants; curses is never initialised here
 
 from rich.style import Style
 from rich.text import Text
@@ -16,6 +15,7 @@ from textual.binding import Binding
 from textual.widget import Widget
 from textual.widgets import Static
 
+from . import keys
 from .parser import Option
 from .session import (
     ESC, LineEdit, Segment, Session, command_kinds, fit_scroll, help_lines, history_empty_message,
@@ -24,9 +24,9 @@ from .session import (
 )
 
 _KEYS = {
-    "up": curses.KEY_UP, "down": curses.KEY_DOWN, "left": curses.KEY_LEFT, "right": curses.KEY_RIGHT,
-    "home": curses.KEY_HOME, "end": curses.KEY_END, "pageup": curses.KEY_PPAGE, "pagedown": curses.KEY_NPAGE,
-    "delete": curses.KEY_DC, "shift+tab": curses.KEY_BTAB,
+    "up": keys.KEY_UP, "down": keys.KEY_DOWN, "left": keys.KEY_LEFT, "right": keys.KEY_RIGHT,
+    "home": keys.KEY_HOME, "end": keys.KEY_END, "pageup": keys.KEY_PPAGE, "pagedown": keys.KEY_NPAGE,
+    "delete": keys.KEY_DC, "shift+tab": keys.KEY_BTAB,
     "enter": "\r", "escape": ESC, "tab": "\t", "backspace": "\x7f", "ctrl+h": "\x7f", "space": " ",
 }
 

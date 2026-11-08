@@ -8,6 +8,8 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from . import compat
+
 MAX_ENTRIES = 1000
 
 
@@ -22,8 +24,7 @@ class Entry:
 def path() -> Path:
     if os.environ.get("HPTUI_HISTORY"):
         return Path(os.environ["HPTUI_HISTORY"])
-    state = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
-    return Path(state) / "hptui" / "history.jsonl"
+    return compat.state_dir() / "history.jsonl"
 
 
 def program_of(command: str) -> str:
@@ -31,12 +32,12 @@ def program_of(command: str) -> str:
     from .cmdline import tokenize
 
     tokens = tokenize(command)
-    return os.path.basename(tokens[0].value) if tokens else ""
+    return compat.program_name(tokens[0].value) if tokens else ""
 
 
 def _read_all() -> list[Entry]:
     try:
-        lines = path().read_text().splitlines()
+        lines = path().read_text(encoding="utf-8").splitlines()
     except OSError:
         return []
     entries = []
@@ -52,7 +53,7 @@ def _write_all(entries: list[Entry]) -> None:
     p = path()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")
-    tmp.write_text("".join(json.dumps(asdict(e)) + "\n" for e in entries[-MAX_ENTRIES:]))
+    tmp.write_text("".join(json.dumps(asdict(e)) + "\n" for e in entries[-MAX_ENTRIES:]), encoding="utf-8")
     tmp.replace(p)
 
 

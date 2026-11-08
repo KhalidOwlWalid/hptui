@@ -5,11 +5,11 @@ from __future__ import annotations
 import argparse
 import locale
 import os
-import shlex
 import subprocess
 import sys
 
-from . import config, history
+from . import compat, config, history, keys
+from .cmdline import quote
 from .parser import guess_command, parse_help
 
 __all__ = ["main"]
@@ -58,7 +58,8 @@ def _read_help(program: list[str]) -> str:
 
 def _run_help(program: list[str]) -> str:
     try:
-        proc = subprocess.run([*program, "--help"], capture_output=True, text=True)
+        proc = subprocess.run([compat.resolve_program(program[0]), *program[1:], "--help"],
+                              capture_output=True, text=True, errors="replace")
     except FileNotFoundError:
         raise SystemExit(f"hptui: command not found: {program[0]}")
     return proc.stdout or proc.stderr
@@ -67,19 +68,19 @@ def _run_help(program: list[str]) -> str:
 def _run_on_tty(fn):
     """Run fn with stdin/stdout pointed at the terminal, even if they are pipes."""
     try:
-        tty = os.open("/dev/tty", os.O_RDWR)
+        tty_in, tty_out = compat.open_terminal()
     except OSError:
         raise SystemExit("hptui: no terminal available")
     sys.stdout.flush()
     saved_in, saved_out = os.dup(0), os.dup(1)
-    os.dup2(tty, 0)
-    os.dup2(tty, 1)
+    os.dup2(tty_in, 0)
+    os.dup2(tty_out, 1)
     try:
         return fn()
     finally:
         os.dup2(saved_in, 0)
         os.dup2(saved_out, 1)
-        for fd in (saved_in, saved_out, tty):
+        for fd in {saved_in, saved_out, tty_in, tty_out}:
             os.close(fd)
 
 
@@ -90,13 +91,7 @@ def _finish(result: str | None, run_it: bool) -> None:
     if not run_it:
         print(result)
         return
-    # Show what is about to run, then hand the process over to the user's shell.
-    print(f"\033[2m❯\033[0m {result}" if sys.stderr.isatty() else f"> {result}", file=sys.stderr, flush=True)
-    shell = os.environ.get("SHELL") or "/bin/sh"
-    try:
-        os.execvp(shell, [shell, "-c", result])
-    except OSError:
-        os.execvp("/bin/sh", ["/bin/sh", "-c", result])
+    compat.run_command(result)
 
 
 def main() -> None:
@@ -110,6 +105,10 @@ def main() -> None:
             print(f"hptui: frontend set to {args.frontend} (saved in {config.path()})", file=sys.stderr)
             return
     frontend = args.frontend or config.load()["frontend"]
+    if frontend == "curses" and not keys.AVAILABLE:
+        hint = " (pip install windows-curses)" if compat.WINDOWS else ""
+        print(f"hptui: curses isn't available{hint}; using the textual frontend", file=sys.stderr)
+        frontend = "textual"
     # UI imports are deferred so --help stays fast; textual is only imported when chosen.
     if frontend == "textual":
         from .textual_ui import run
@@ -138,6 +137,6 @@ def main() -> None:
     if not options:
         raise SystemExit("hptui: no options found in the help text")
 
-    command = args.command or shlex.join(args.program) or guess_command(text) or "command"
+    command = args.command or " ".join(quote(a) for a in args.program) or guess_command(text) or "command"
     app = _run_on_tty(lambda: run(options, command, open_history=args.history))
     _finish(app.result, run_it)

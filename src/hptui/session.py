@@ -1,26 +1,25 @@
 """Frontend-independent TUI state and key handling.
 
-Keys use the curses vocabulary (curses.KEY_* constants and characters) so the
-curses frontend can pass them straight through; other frontends translate.
+Keys are characters or the keys.KEY_* codes, which match curses so the curses
+frontend can pass them straight through; other frontends translate.
 """
 
 from __future__ import annotations
 
-import curses
 import os
 import re
 import textwrap
 from dataclasses import dataclass, field
 
-from . import cmdline, history
+from . import cmdline, history, keys
 from .parser import Option
 
 # Raw-mode control characters.
 CTRL_A, CTRL_C, CTRL_D, CTRL_E, CTRL_K, CTRL_N = "\x01", "\x03", "\x04", "\x05", "\x0b", "\x0e"
 CTRL_P, CTRL_R, CTRL_S, CTRL_U, CTRL_W = "\x10", "\x12", "\x13", "\x15", "\x17"
 ESC = "\x1b"
-ENTER_KEYS = ("\n", "\r", curses.KEY_ENTER)
-BACKSPACE_KEYS = ("\x7f", "\x08", curses.KEY_BACKSPACE)
+ENTER_KEYS = ("\n", "\r", keys.KEY_ENTER)
+BACKSPACE_KEYS = ("\x7f", "\x08", keys.KEY_BACKSPACE)
 
 
 @dataclass
@@ -47,18 +46,18 @@ class LineEdit:
             if c > 0:
                 self.text = t[:c - 1] + t[c:]
                 self.cursor -= 1
-        elif key == curses.KEY_DC:
+        elif key == keys.KEY_DC:
             self.text = t[:c] + t[c + 1:]
-        elif key == curses.KEY_LEFT:
+        elif key == keys.KEY_LEFT:
             self.cursor = max(0, c - 1)
             return True
-        elif key == curses.KEY_RIGHT:
+        elif key == keys.KEY_RIGHT:
             self.cursor = min(len(t), c + 1)
             return True
-        elif key in (curses.KEY_HOME, CTRL_A):
+        elif key in (keys.KEY_HOME, CTRL_A):
             self.cursor = 0
             return True
-        elif key in (curses.KEY_END, CTRL_E):
+        elif key in (keys.KEY_END, CTRL_E):
             self.cursor = len(t)
             return True
         elif key == CTRL_U:
@@ -209,7 +208,7 @@ class Session:
             return self.toggle_command_box()
         if key == "\t":
             return self.move_focus(1)
-        if key == curses.KEY_BTAB:
+        if key == keys.KEY_BTAB:
             return self.move_focus(-1)
 
         if self.focus == "cmd":
@@ -225,9 +224,9 @@ class Session:
         if key == ESC:
             self.focus = "list"
             return
-        if key == curses.KEY_DOWN:
+        if key == keys.KEY_DOWN:
             return self.move_focus(1)
-        if key == curses.KEY_UP:
+        if key == keys.KEY_UP:
             return self.move_focus(-1)
         if self.cmd.handle(key):
             self.sync_fields()
@@ -242,9 +241,9 @@ class Session:
             box.dirty = False
             self.focus = "list"
             self.sync_fields()
-        elif key == curses.KEY_DOWN:
+        elif key == keys.KEY_DOWN:
             self.move_focus(1)
-        elif key == curses.KEY_UP:
+        elif key == keys.KEY_UP:
             self.move_focus(-1)
         else:
             box.handle(key)
@@ -252,15 +251,15 @@ class Session:
     def _move_cursor(self, key, n: int) -> bool:
         """Cursor movement shared by normal and search mode. Returns True if handled."""
         half = 10
-        if key == curses.KEY_DOWN:
+        if key == keys.KEY_DOWN:
             self.list_index = min(n - 1, self.list_index + 1)
-        elif key == curses.KEY_UP:
+        elif key == keys.KEY_UP:
             if self.list_index == 0 and not self.searching:
                 self.move_focus(-1)
             self.list_index = max(0, self.list_index - 1)
-        elif key in (curses.KEY_NPAGE, CTRL_D):
+        elif key in (keys.KEY_NPAGE, CTRL_D):
             self.list_index = min(n - 1, self.list_index + half)
-        elif key in (curses.KEY_PPAGE, CTRL_U):
+        elif key in (keys.KEY_PPAGE, CTRL_U):
             self.list_index = max(0, self.list_index - half)
         else:
             return False
@@ -290,16 +289,16 @@ class Session:
         elif key == "j":
             self.list_index = min(n - 1, self.list_index + 1)
         elif key == "k":
-            self._move_cursor(curses.KEY_UP, n)
-        elif key in ("g", curses.KEY_HOME):
+            self._move_cursor(keys.KEY_UP, n)
+        elif key in ("g", keys.KEY_HOME):
             self.list_index = 0
-        elif key in ("G", curses.KEY_END):
+        elif key in ("G", keys.KEY_END):
             self.list_index = n - 1
         elif key == " " and current:
             self.toggle(current, jump_to_field=False)
-        elif key in (*ENTER_KEYS, "l", curses.KEY_RIGHT) and current:
+        elif key in (*ENTER_KEYS, "l", keys.KEY_RIGHT) and current:
             self.toggle(current, jump_to_field=True)
-        elif key in ("h", curses.KEY_LEFT) and current:
+        elif key in ("h", keys.KEY_LEFT) and current:
             if current.key in self.occurrences():
                 self.toggle(current, jump_to_field=False)
         elif key == "/":
@@ -385,13 +384,13 @@ class Session:
         if key == CTRL_P and not self.standalone:
             self.close_history()
             self.focus = "cmd"
-        elif key == curses.KEY_DOWN or (key == "j" and not self.hist_searching):
+        elif key == keys.KEY_DOWN or (key == "j" and not self.hist_searching):
             self.hist_index = min(n - 1, self.hist_index + 1)
-        elif key == curses.KEY_UP or (key == "k" and not self.hist_searching):
+        elif key == keys.KEY_UP or (key == "k" and not self.hist_searching):
             self.hist_index = max(0, self.hist_index - 1)
-        elif key in (curses.KEY_NPAGE, CTRL_D):
+        elif key in (keys.KEY_NPAGE, CTRL_D):
             self.hist_index = min(n - 1, self.hist_index + 10)
-        elif key in (curses.KEY_PPAGE, CTRL_U):
+        elif key in (keys.KEY_PPAGE, CTRL_U):
             self.hist_index = max(0, self.hist_index - 10)
         elif key in ENTER_KEYS:
             self.hist_searching = False
@@ -420,9 +419,9 @@ class Session:
             history.delete(current.command)
             self.hist_entries.remove(current)
             self.message = "deleted from history"
-        elif key in ("g", curses.KEY_HOME):
+        elif key in ("g", keys.KEY_HOME):
             self.hist_index = 0
-        elif key in ("G", curses.KEY_END):
+        elif key in ("G", keys.KEY_END):
             self.hist_index = n - 1
         elif key == "/":
             self.hist_searching = True
@@ -442,17 +441,17 @@ class Session:
 
     def handle_help(self, key) -> None:
         """Scroll with j/k etc.; frontends clamp help_scroll to the content height."""
-        if key in (curses.KEY_DOWN, "j"):
+        if key in (keys.KEY_DOWN, "j"):
             self.help_scroll += 1
-        elif key in (curses.KEY_UP, "k"):
+        elif key in (keys.KEY_UP, "k"):
             self.help_scroll -= 1
-        elif key in (curses.KEY_NPAGE, CTRL_D, " "):
+        elif key in (keys.KEY_NPAGE, CTRL_D, " "):
             self.help_scroll += 10
-        elif key in (curses.KEY_PPAGE, CTRL_U):
+        elif key in (keys.KEY_PPAGE, CTRL_U):
             self.help_scroll -= 10
-        elif key in ("g", curses.KEY_HOME):
+        elif key in ("g", keys.KEY_HOME):
             self.help_scroll = 0
-        elif key in ("G", curses.KEY_END):
+        elif key in ("G", keys.KEY_END):
             self.help_scroll = 10_000
         elif key in (ESC, "q", "?", "h", *ENTER_KEYS):
             self.help_open = False

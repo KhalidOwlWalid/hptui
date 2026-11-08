@@ -1,3 +1,6 @@
+import pytest
+
+from hptui import cmdline
 from hptui.cmdline import add_option, occurrences_by_key, quote, remove_option, set_value, tokenize
 from hptui.parser import guess_command, parse_help
 
@@ -21,6 +24,12 @@ Usage: help2man [OPTION]... EXECUTABLE
 
 OPTS = parse_help(HELP)
 BY = {o.name: o for o in OPTS}
+
+
+@pytest.fixture(autouse=True)
+def posix_shell(monkeypatch):
+    """These tests describe POSIX shell rules; pin them so they also hold when run on Windows."""
+    monkeypatch.setattr(cmdline, "POSIX", True)
 
 
 def test_parse_basic():
