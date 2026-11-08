@@ -1,4 +1,4 @@
-"""Platform differences (Linux/macOS vs Windows) kept in one place."""
+"""Platform differences (Linux vs Windows) kept in one place."""
 
 from __future__ import annotations
 

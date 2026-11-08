@@ -42,7 +42,7 @@ git --help | hptui
 hptui git
 ```
 
-Differences from Linux/macOS:
+Differences from Linux:
 
 - The finished command runs through `cmd.exe` (`%COMSPEC%`), and values are
   quoted with Windows rules: double quotes only, and backslashes in paths are
