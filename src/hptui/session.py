@@ -9,10 +9,11 @@ from __future__ import annotations
 import os
 import re
 import textwrap
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from . import cmdline, history, keys
-from .parser import Example, Option
+from .parser import Example, Option, Subcommand, parse_examples, parse_help, parse_subcommands
 
 # Raw-mode control characters.
 CTRL_A, CTRL_C, CTRL_D, CTRL_E, CTRL_K, CTRL_N = "\x01", "\x03", "\x04", "\x05", "\x0b", "\x0e"
@@ -87,6 +88,26 @@ class LineEdit:
 
 
 @dataclass
+class Page:
+    """What one (sub)command's help page offers, plus where the user was on it."""
+
+    options: list[Option]
+    subcommands: list[Subcommand]
+    examples: list[Example]
+    path: list[str]  # subcommand words as they appear in the command, e.g. ["container", "ls"]
+    help_text: str = ""
+    list_index: int = 0
+    list_scroll: int = 0
+    query: str = ""
+
+
+# Runs a program's help, e.g. ["git", "commit"] -> output of `git commit -h`.
+HelpLoader = Callable[[list[str]], str]
+
+Item = Option | Subcommand  # a row in the list
+
+
+@dataclass
 class Session:
     options: list[Option]
     cmd: LineEdit
@@ -108,28 +129,58 @@ class Session:
     hist_scroll: int = 0
     hist_query: str = ""
     hist_searching: bool = False
-    # "?" key reference
+    # full-screen reader: "?" key reference, or "D" for the page's whole help text
     help_open: bool = False
     help_scroll: int = 0
+    reader: str = "keys"  # "keys" | "details"
+    help_text: str = ""  # the current page's --help output
     edit_request: str | None = None  # standalone: command the user wants to edit
     # the same picker panel also lists examples parsed from the help page
     examples: list[Example] = field(default_factory=list)
     hist_kind: str = "history"  # "history" | "examples"
+    # subcommands: each one opens a page with its own help; parent pages are kept on a stack
+    subcommands: list[Subcommand] = field(default_factory=list)
+    path: list[str] = field(default_factory=list)
+    parents: list[Page] = field(default_factory=list)
+    loader: HelpLoader | None = None
+    root_program: str = ""  # program to run for subcommand help, e.g. "git"
+    title_text: str = ""
+    page_cache: dict[tuple[str, ...], tuple[list[Option], list[Subcommand], list[Example], str]] = \
+        field(default_factory=dict)
 
     # ---- derived state -------------------------------------------------
 
+    @property
+    def scope(self) -> cmdline.Scope:
+        return cmdline.Scope(tuple(self.path), frozenset(n for sub in self.subcommands for n in sub.names))
+
     def occurrences(self) -> dict[str, cmdline.Occurrence]:
-        return cmdline.occurrences_by_key(self.cmd.text, self.options)
+        return cmdline.occurrences_by_key(self.cmd.text, self.options, self.scope)
+
+    def active_subcommand(self) -> Subcommand | None:
+        """The subcommand of this page that the command currently uses, if any."""
+        tok = self.scope.subcommand_token(self.cmd.text)
+        if tok is None:
+            return None
+        return next((sub for sub in self.subcommands if tok.value in sub.names), None)
+
+    def title(self) -> str:
+        return " ".join([self.title_text, *self.path]).strip()
 
     def value_options(self) -> list[Option]:
         """Checked options that take a value, in command order. Each gets an input box."""
         return [o.option for o in self.occurrences().values() if o.option.takes_value]
 
-    def filtered(self) -> list[Option]:
+    def items(self) -> list[Item]:
+        return [*self.subcommands, *self.options]
+
+    def filtered(self) -> list[Item]:
+        """Rows of the list: subcommands first, then options, narrowed by the search."""
         q = self.query.lower()
         if not q:
-            return self.options
-        return [o for o in self.options if q in f"{o.spec} {o.description}".lower()]
+            return self.items()
+        hits = [i for i in self.items() if q in f"{_item_label(i)} {i.description}".lower()]
+        return sorted(hits, key=lambda i: q not in _item_label(i).lower())  # name matches first
 
     def sync_fields(self) -> None:
         """Refresh value boxes from the command text (except the one being edited)."""
@@ -156,7 +207,8 @@ class Session:
         key = self.focus[6:]
         box = self.fields.get(key)
         if box is not None and box.dirty:
-            self.cmd.set(cmdline.set_value(self.cmd.text, self.option_by_key(key), box.text, self.options))
+            self.cmd.set(cmdline.set_value(self.cmd.text, self.option_by_key(key), box.text, self.options,
+                                           self.scope))
             box.dirty = False
 
     def move_focus(self, step: int) -> None:
@@ -167,11 +219,13 @@ class Session:
         self.focus = order[(idx + step) % len(order)]
         self.sync_fields()
 
-    def toggle(self, opt: Option, jump_to_field: bool) -> None:
+    def toggle(self, opt: Item, jump_to_field: bool) -> None:
+        if isinstance(opt, Subcommand):
+            return self.open_subcommand(opt)
         if opt.key in self.occurrences():
-            self.cmd.set(cmdline.remove_option(self.cmd.text, opt, self.options))
+            self.cmd.set(cmdline.remove_option(self.cmd.text, opt, self.options, self.scope))
         else:
-            self.cmd.set(cmdline.add_option(self.cmd.text, opt))
+            self.cmd.set(cmdline.add_option(self.cmd.text, opt, self.scope))
             if opt.takes_value and jump_to_field:
                 self.fields[opt.key] = LineEdit()
                 self.focus = f"field:{opt.key}"
@@ -183,6 +237,79 @@ class Session:
         self.searching = False
         self.focus = "list" if self.focus == "cmd" else "cmd"
         self.sync_fields()
+
+    # ---- subcommand pages ----------------------------------------------------
+
+    def _load_page(self, path: list[str]) -> tuple[list[Option], list[Subcommand], list[Example], str]:
+        key = tuple(path)
+        if key not in self.page_cache:
+            text = ""
+            if self.loader is not None and self.root_program:
+                try:
+                    text = self.loader([self.root_program, *path])
+                except Exception:  # the program vanished, timed out, ...
+                    text = ""
+            self.page_cache[key] = (parse_help(text), parse_subcommands(text),
+                                    parse_examples(text, self.root_program), text)
+        return self.page_cache[key]
+
+    def open_subcommand(self, sub: Subcommand) -> None:
+        """Put the subcommand in the command (replacing a different one) and show its page."""
+        self.commit_field()
+        tok = self.scope.subcommand_token(self.cmd.text)
+        word = sub.name
+        if tok is not None and tok.value in sub.names:
+            word = tok.value  # already there, maybe as an alias
+        elif tok is not None:
+            self.cmd.set(self.cmd.text[:tok.start] + sub.name + " ")  # its options don't apply to `sub`
+            self.message = f"switched from {tok.value} to {sub.name}"
+        else:
+            self.cmd.set(cmdline._append(self.cmd.text.rstrip(), sub.name) + " ")
+        self._push_page([*self.path, word])
+
+    def _push_page(self, path: list[str]) -> None:
+        self.parents.append(Page(self.options, self.subcommands, self.examples, self.path, self.help_text,
+                                 self.list_index, self.list_scroll, self.query))
+        self.options, self.subcommands, self.examples, self.help_text = self._load_page(path)
+        self.path = path
+        self.list_index, self.list_scroll, self.query, self.searching = 0, 0, "", False
+        self.fields.clear()
+        self.focus = "list"
+        if not self.options and not self.subcommands and not self.message:
+            self.message = f"no options found in the help for `{self.title()}`"
+        self.sync_fields()
+
+    def go_back(self) -> bool:
+        """Return to the parent command's page. The command text is left as it is."""
+        if not self.parents:
+            return False
+        self.commit_field()
+        page = self.parents.pop()
+        self.options, self.subcommands, self.examples, self.path = page.options, page.subcommands, page.examples, page.path
+        self.help_text = page.help_text
+        self.list_index, self.list_scroll, self.query = page.list_index, page.list_scroll, page.query
+        self.searching = False
+        self.fields.clear()
+        self.focus = "list"
+        self.sync_fields()
+        return True
+
+    def follow_command(self) -> None:
+        """Show the page for the subcommands written in the command, e.g. after loading `git commit -m x`."""
+        while self.go_back():
+            pass
+        for _ in range(8):  # docker container ls ... ; bounded in case of a loop
+            tok = self.scope.subcommand_token(self.cmd.text)
+            if tok is None or not any(tok.value in sub.names for sub in self.subcommands):
+                break
+            self._push_page([*self.path, tok.value])
+
+    def remove_subcommand(self) -> None:
+        """Drop the subcommand and everything after it."""
+        tok = self.scope.subcommand_token(self.cmd.text)
+        if tok is not None:
+            self.cmd.set(self.cmd.text[:tok.start])
+            self.sync_fields()
 
     def accept(self) -> None:
         self.commit_field()
@@ -268,11 +395,11 @@ class Session:
             return False
         return True
 
-    def pick(self, opt: Option, jump_to_field: bool) -> None:
+    def pick(self, opt: Item, jump_to_field: bool) -> None:
         """Toggle from search results, then drop the filter and land on that option."""
         self.searching = False
         self.query = ""
-        self.list_index = self.options.index(opt)
+        self.list_index = self.items().index(opt)
         self.toggle(opt, jump_to_field)
 
     def handle_list(self, key) -> None:
@@ -302,7 +429,10 @@ class Session:
         elif key in (*ENTER_KEYS, "l", keys.KEY_RIGHT) and current:
             self.toggle(current, jump_to_field=True)
         elif key in ("h", keys.KEY_LEFT) and current:
-            if current.key in self.occurrences():
+            if isinstance(current, Subcommand):
+                if current is self.active_subcommand():
+                    self.remove_subcommand()
+            elif current.key in self.occurrences():
                 self.toggle(current, jump_to_field=False)
         elif key == "/":
             self.searching = True
@@ -316,11 +446,15 @@ class Session:
             self.open_examples()
         elif key == "?":
             self.open_help()
+        elif key == "D":
+            self.open_details()
         elif key == "q":
             self.cancel()
         elif key == ESC and self.query:
             self.query = ""
             self.list_index = 0
+        elif key == ESC or key in BACKSPACE_KEYS:
+            self.go_back()
 
     def handle_search(self, key) -> None:
         """Type to filter; Enter picks the highlighted match like fzf."""
@@ -380,6 +514,7 @@ class Session:
             return
         self.cmd.set(entry.command)
         self.close_history()
+        self.follow_command()
         self.focus = "cmd"
         self.sync_fields()
 
@@ -456,7 +591,13 @@ class Session:
     # ---- "?" help ------------------------------------------------------------
 
     def open_help(self) -> None:
-        self.help_open, self.help_scroll = True, 0
+        self.help_open, self.help_scroll, self.reader = True, 0, "keys"
+
+    def open_details(self) -> None:
+        """Read the current page's whole help text: description, usage, notes."""
+        self.commit_field()
+        self.searching = False
+        self.help_open, self.help_scroll, self.reader = True, 0, "details"
 
     def handle_help(self, key) -> None:
         """Scroll with j/k etc.; frontends clamp help_scroll to the content height."""
@@ -472,7 +613,11 @@ class Session:
             self.help_scroll = 0
         elif key in ("G", keys.KEY_END):
             self.help_scroll = 10_000
-        elif key in (ESC, "q", "?", "h", *ENTER_KEYS):
+        elif key == "?" and self.reader == "details":
+            self.open_help()
+        elif key == "D" and self.reader == "keys":
+            self.open_details()
+        elif key in (ESC, "q", "?", "D", "h", *ENTER_KEYS):
             self.help_open = False
         self.help_scroll = max(0, self.help_scroll)
 
@@ -483,25 +628,40 @@ def wrap(text: str, width: int) -> list[str]:
     return textwrap.wrap(text, max(10, width), break_on_hyphens=False) or [""]
 
 
-def spec_width(items: list[Option], w: int) -> int:
+def _item_label(item: Item) -> str:
+    return item.spec if isinstance(item, Option) else ", ".join(item.names)
+
+
+def spec_width(items: list[Item], w: int) -> int:
     # Flags longer than the column get their own line, so keep the column modest.
-    return min(26, w // 3, max((len(o.spec) for o in items), default=0))
+    return min(26, w // 3, max((len(_item_label(i)) for i in items), default=0))
 
 
-def option_lines(opt: Option, checked: bool, spec_w: int, w: int) -> list[str]:
-    """One option as screen lines, with the description wrapped under its own column."""
-    head = f" {'[x]' if checked else '[ ]'} "
+def _row_lines(head: str, label: str, description: str, spec_w: int, w: int) -> list[str]:
+    """head + label, with the description wrapped in its own column."""
     indent = len(head) + spec_w + 2
     desc_w = w - 1 - indent
     if desc_w < 20:  # too narrow for two columns: description goes below the flags
         indent, desc_w = len(head) + 2, w - 1 - len(head) - 2
-    if not opt.description:
-        return [head + opt.spec]
-    desc = wrap(opt.description, desc_w)
-    if len(head) + len(opt.spec) + 2 > indent:  # flags don't fit the column: own line
-        return [head + opt.spec] + [" " * indent + d for d in desc]
-    first = (head + opt.spec).ljust(indent) + desc[0]
+    if not description:
+        return [head + label]
+    desc = wrap(description, desc_w)
+    if len(head) + len(label) + 2 > indent:  # flags don't fit the column: own line
+        return [head + label] + [" " * indent + d for d in desc]
+    first = (head + label).ljust(indent) + desc[0]
     return [first] + [" " * indent + d for d in desc[1:]]
+
+
+def option_lines(opt: Option, checked: bool, spec_w: int, w: int) -> list[str]:
+    """One option as screen lines, with the description wrapped under its own column."""
+    return _row_lines(f" {'[x]' if checked else '[ ]'} ", opt.spec, opt.description, spec_w, w)
+
+
+SUB_HEAD, SUB_HEAD_ACTIVE = "  ›  ", "  ●  "
+
+
+def subcommand_lines(sub: Subcommand, active: bool, spec_w: int, w: int) -> list[str]:
+    return _row_lines(SUB_HEAD_ACTIVE if active else SUB_HEAD, _item_label(sub), sub.description, spec_w, w)
 
 
 HISTORY_INDENT = 12  # " 10m ago  " column
@@ -524,13 +684,24 @@ def fit_scroll(heights: list[int], index: int, scroll: int, avail: int) -> int:
 
 
 def options_header(s: Session) -> tuple[str, str]:
-    """("Options (n/m selected)", search/filter hint)."""
-    header = f"Options ({len(s.occurrences())}/{len(s.options)} selected)"
+    """("Commands (n) · Options (n/m selected)", search/filter hint)."""
+    parts = []
+    if s.subcommands:
+        parts.append(f"Commands ({len(s.subcommands)})")
+    if s.options or not s.subcommands:
+        parts.append(f"Options ({len(s.occurrences())}/{len(s.options)} selected)")
+    header = " · ".join(parts)
     if s.searching:
         return header, f"/{s.query}"
     if s.query:
         return header, f"filter: {s.query}  (esc clears)"
     return header, "/ to search" if s.focus == "list" else ""
+
+
+def list_empty_message(s: Session) -> str:
+    if s.query:
+        return "no matches"
+    return "no options or commands found in this help page"
 
 
 def history_header(s: Session) -> tuple[str, str]:
@@ -576,11 +747,15 @@ HELP: list[tuple[str, list[tuple[str, str]]]] = [
         ("Space", "toggle option"),
         ("l / Enter", "toggle option and edit its value"),
         ("h", "uncheck option"),
+        ("l on a › row", "open that subcommand's own options"),
+        ("h on the ● row", "remove the subcommand (and what follows it)"),
         ("/", "search"),
         ("i / a", "edit the command box"),
         ("H", "history"),
         ("E", "examples from the help page (if it has any)"),
-        ("Esc", "clear the search filter"),
+        ("D", "details: the whole help text of this page"),
+        ("Esc", "clear the search filter, else back to the parent command"),
+        ("Backspace", "back to the parent command"),
         ("?", "this help"),
         ("q", "quit without output"),
     ]),
@@ -640,10 +815,76 @@ def help_lines(w: int) -> list[tuple[str, str, int]]:
     return out
 
 
+def help_segments(w: int) -> list[list[Segment]]:
+    out = []
+    for text, kind, key_end in help_lines(w):
+        if kind == "key":
+            out.append([(text[:key_end], "key"), (text[key_end:], "")])
+        else:
+            out.append([(text, kind)])
+    return out
+
+
+_HEADING_RE = re.compile(r"^[A-Z][\w ,/&()'-]{0,60}:?$")  # "Options:", "Management Commands", "EXAMPLES"
+_USAGE_LINE_RE = re.compile(r"^(\s*usage:)(.*)$", re.IGNORECASE)
+_TEXT_FLAG_RE = re.compile(r"(?<![\w-])--?[A-Za-z0-9?][\w.-]*")
+_TEXT_METAVAR_RE = re.compile(r"<[^<>\s][^<>]*>")
+
+
+def _details_kinds(line: str) -> list[str]:
+    kinds = [""] * len(line)
+    stripped = line.strip()
+    if _USAGE_LINE_RE.match(line):
+        head = _USAGE_LINE_RE.match(line).group(1)
+        kinds[:len(head)] = ["section"] * len(head)
+    elif (len(line) - len(line.lstrip()) <= 1 and _HEADING_RE.match(stripped)
+          and (stripped.endswith(":") or stripped.istitle() or stripped.isupper())):
+        return ["section"] * len(line)  # a section heading at the left margin
+    for m in _TEXT_METAVAR_RE.finditer(line):
+        kinds[m.start():m.end()] = ["metavar"] * (m.end() - m.start())
+    for m in _TEXT_FLAG_RE.finditer(line):
+        kinds[m.start():m.end()] = ["flag"] * (m.end() - m.start())
+    return kinds
+
+
+def details_segments(s: Session, w: int) -> list[list[Segment]]:
+    """The page's help text, wrapped to the screen (keeping indentation) and lightly coloured."""
+    text = s.help_text.expandtabs(8).rstrip()
+    if not text.strip():
+        return [[(" no help text for this page", "dim")]]
+    out: list[list[Segment]] = []
+    width = max(20, w - 2)
+    for raw in text.splitlines():
+        raw = raw.rstrip()
+        kinds = _details_kinds(raw)
+        indent = len(raw) - len(raw.lstrip())
+        pieces = textwrap.wrap(raw, width, subsequent_indent=" " * min(indent, width // 2),
+                               break_on_hyphens=False, drop_whitespace=True) if len(raw) > width else [raw]
+        pos = 0
+        for piece in pieces:
+            # map the wrapped piece back onto the original line to keep its colours
+            body = piece.lstrip()
+            start = raw.find(body, pos) if body else pos
+            piece_kinds = [""] * (len(piece) - len(body)) + kinds[start:start + len(body)]
+            pos = start + len(body)
+            out.append([(" ", "")] + runs(piece, piece_kinds))
+    return out
+
+
+def reader_title(s: Session) -> str:
+    return f"Details · {s.title()}" if s.reader == "details" else "Keys"
+
+
+def reader_segments(s: Session, w: int) -> list[list[Segment]]:
+    return details_segments(s, w) if s.reader == "details" else help_segments(w)
+
+
 def key_hints(s: Session) -> list[tuple[str, str]]:
     """(key, what it does) pairs for the bottom bar."""
     if s.help_open:
-        return [("j/k", "scroll"), ("esc / q / ?", "close")]
+        if s.reader == "details":
+            return [("j/k", "scroll"), ("^D/^U", "page"), ("g/G", "top/bottom"), ("?", "keys"), ("esc / D", "close")]
+        return [("j/k", "scroll"), ("D", "details"), ("esc / q / ?", "close")]
     if s.hist_open:
         if s.hist_searching:
             return [("type", "to filter"), ("↑↓", "move"), ("enter", "edit"), ("^S", "use as-is"), ("esc", "stop")]
@@ -658,10 +899,17 @@ def key_hints(s: Session) -> list[tuple[str, str]]:
     if s.focus == "list":
         if s.searching:
             return [("type", "to filter"), ("↑↓", "move"), ("enter", "pick"), ("esc", "browse results")]
-        hints = [("j/k", "move"), ("space", "toggle"), ("l", "edit"), ("/", "search"), ("^P", "command")]
+        items = s.filtered()
+        current = items[s.list_index] if 0 <= s.list_index < len(items) else None
+        if isinstance(current, Subcommand):
+            hints = [("j/k", "move"), ("l", "open"), ("/", "search"), ("^P", "command")]
+        else:
+            hints = [("j/k", "move"), ("space", "toggle"), ("l", "edit"), ("/", "search"), ("^P", "command")]
+        if s.parents:
+            hints.append(("esc", "back"))
         if s.examples:
             hints.append(("E", f"examples ({len(s.examples)})"))
-        return hints + [("^S", "done"), ("?", "help")]
+        return hints + [("D", "details"), ("^S", "done"), ("?", "help")]
     if s.focus == "cmd":
         return [("enter", "done"), ("^P", "options"), ("tab/↓", "next"), ("esc", "back to list")]
     return [("enter", "set value"), ("esc", "discard"), ("tab/↑↓", "move"), ("^P", "command"), ("^S", "done")]
@@ -693,7 +941,7 @@ def runs(text: str, kinds: list[str]) -> list[Segment]:
     return out
 
 
-def command_kinds(text: str, options: list[Option]) -> list[str]:
+def command_kinds(text: str, options: list[Option], scope: cmdline.Scope = cmdline.ROOT) -> list[str]:
     """A kind for every character of a command line (syntax highlighting)."""
     kinds = [""] * len(text)
 
@@ -720,8 +968,15 @@ def command_kinds(text: str, options: list[Option]) -> list[str]:
                 paint(tok.start, tok.end, "flag")
         else:
             paint(tok.start, tok.end, "string" if raw[:1] in ("'", '"') or '"' in raw else "arg")
+    # subcommand words read like the program: `git commit`
+    tokens = cmdline.tokenize(text)
+    path, _, end = scope.locate(tokens)
+    if end < len(tokens):
+        path.append(end)
+    for k in path:
+        paint(tokens[k].start, tokens[k].end, "program")
     # values of known options (e.g. the FILE in "-o FILE") are values, not positional args
-    for occ in cmdline.find_occurrences(text, options):
+    for occ in cmdline.find_occurrences(text, options, scope):
         if occ.value_start is not None and occ.style in ("sep", "attached", "cluster_value"):
             raw = text[occ.value_start:occ.value_end]
             paint(occ.value_start, occ.value_end, "string" if raw[:1] in ("'", '"') else "value")
@@ -754,6 +1009,34 @@ def option_segments(opt: Option, checked: bool, spec_w: int, w: int, query: str 
         _mark_matches(line, kinds, query)
         out.append(runs(line, kinds))
     return out
+
+
+def subcommand_segments(sub: Subcommand, active: bool, spec_w: int, w: int, query: str = "") -> list[list[Segment]]:
+    lines = subcommand_lines(sub, active, spec_w, w)
+    out = []
+    for n, line in enumerate(lines):
+        kinds = [""] * len(line)
+        if n == 0:
+            head = SUB_HEAD_ACTIVE if active else SUB_HEAD
+            kinds[:len(head)] = ["check" if active else "dim"] * len(head)
+            label = _item_label(sub)
+            for j, ch in enumerate(label):
+                kinds[len(head) + j] = "punct" if ch == "," else "program"
+        _mark_matches(line, kinds, query)
+        out.append(runs(line, kinds))
+    return out
+
+
+def list_segments(s: Session, w: int) -> list[list[list[Segment]]]:
+    """Every row of the (filtered) list, coloured."""
+    items = s.filtered()
+    occs = s.occurrences()
+    active = s.active_subcommand()
+    # commands and options each get their own column width: short names stay compact
+    sub_w = spec_width([i for i in items if isinstance(i, Subcommand)], w)
+    opt_w = spec_width([i for i in items if isinstance(i, Option)], w)
+    return [subcommand_segments(i, i is active, sub_w, w, s.query) if isinstance(i, Subcommand)
+            else option_segments(i, i.key in occs, opt_w, w, s.query) for i in items]
 
 
 def example_segments(ex: Example, w: int, query: str = "") -> list[list[Segment]]:
@@ -805,10 +1088,19 @@ def new_session(
     open_examples: bool = False,
     standalone: bool = False,
     examples: list[Example] | None = None,
+    subcommands: list[Subcommand] | None = None,
+    loader: HelpLoader | None = None,
+    title: str | None = None,
+    help_text: str = "",
 ) -> Session:
-    s = Session(options=options, cmd=LineEdit(), standalone=standalone, examples=examples or [])
+    s = Session(options=options, cmd=LineEdit(), standalone=standalone, examples=examples or [],
+                subcommands=subcommands or [], loader=loader, help_text=help_text)
     s.program = history.program_of(command) if program is None else program
     s.cmd.set(command.rstrip() + " " if command else "")
+    tokens = cmdline.tokenize(command)
+    s.root_program = tokens[0].value if tokens else ""
+    s.title_text = title or s.root_program or "history"
+    s.follow_command()  # `hptui git commit` starts on commit's page
     s.sync_fields()
     if open_history or standalone:
         s.open_history()

@@ -31,64 +31,134 @@ class Option:
         return self.long or self.short or self.spec
 
 
-# One flag spelling plus whatever describes its argument.
-_FLAG_RE = re.compile(
-    r"""^(?P<flag>--?[A-Za-z0-9?#@][\w.+#@-]*)   # -n, --name, -?, --dry-run
-        (?P<rest>.*)$""",
+_USAGE_RE = re.compile(r"^\s*usage:\s*(\S+)", re.IGNORECASE)
+
+# Brackets nest one level deep: keyword[[:]=value].
+_BR = r"\[(?:[^\[\]]|\[[^\]]*\])*\]"
+
+# One piece of the flag column of an option line.
+_SPEC_TOKEN_RE = re.compile(
+    r"""(?P<flag>--?[A-Za-z0-9?#@][\w.+#@-]*)            # -n, --name, -?, --dry-run, --verbose...
+          (?P<attached>=?BR(?=[\s,|]|$)                   # --color[=WHEN], -O[LEVEL]
+                      |=?<[^>]*>(?:\.\.\.)?               # --file=<path>
+                      |=(?:BR|[^\s,|\[]|\|(?!-))+)?        # --name=STRING, --lines=[-]NUM, --stderr=e|a|c
+      | (?P<angle>=?<[^>]*>)                              # <file>, <on | off>, <var>=<value>
+      | (?P<square>BR)                                    # [BAR]
+      | (?P<brace>\{[^}]*\})                              # {fast,slow}
+      | (?P<winflag>/[A-Za-z?]\w*)                        # /V (Windows spelling, skipped)
+      | (?P<sep>[,|/])
+      | (?P<word>(?:[^\s,|]|\|(?!-))+)                    # FILE, a|b|c, or the first word of the description
+    """.replace("BR", _BR),
     re.VERBOSE,
 )
-_USAGE_RE = re.compile(r"^\s*usage:\s*(\S+)", re.IGNORECASE)
-_COLUMN_GAP_RE = re.compile(r"\s{2,}|\t|\s:\s")
+_CAPS_RE = re.compile(r"[A-Z][A-Z0-9_.:-]*")
+_WS_RE = re.compile(r"\s*")
+_OVERSTRIKE_RE = re.compile(r".\x08")  # bold/underline the way man and less print it
 
 
-def _parse_arg(rest: str) -> tuple[str | None, bool] | None:
-    """Parse the text after a flag name. Returns (metavar, optional) or None if unparseable."""
-    rest = rest.strip() if not rest.startswith(("=", "[")) else rest
-    if not rest:
-        return None, False
-    m = re.fullmatch(r"\[=?\s*<?([^\]>]+?)>?\s*\](?:\.\.\.)?", rest)
-    if m:  # --color[=WHEN], -O[LEVEL], --foo [BAR]
-        return m.group(1).strip(), True
-    m = re.fullmatch(r"[= ]?\s*<([^>]+)>(?:\.\.\.)?", rest)
-    if m:  # --file <path>, --file=<path>
-        return m.group(1).strip(), False
-    m = re.fullmatch(r"[= ]?\s*([^\s\[\]<>=]+)", rest)
-    if m:  # --name=STRING, -o FILE
-        return m.group(1), False
-    return "__bad__", False
+def _metavar(text: str) -> tuple[str, bool]:
+    """"=STRING" -> ("STRING", False), "[=WHEN]" -> ("WHEN", True), "[<file>...]" -> ("file", True)."""
+    text = text.lstrip("=")
+    optional = text.startswith("[") and text.endswith("]")
+    if optional:
+        text = text[1:-1].lstrip("=").strip()
+    text = text.removesuffix("...")
+    if text.startswith("<") and text.endswith(">"):
+        text = text[1:-1]
+    return text.strip() or "VALUE", optional  # "--title=..." still takes a value
 
 
-def _parse_spec(spec: str) -> Option | None:
-    """Parse the flag column of an option line, e.g. "-n, --name=STRING"."""
-    # Split on ", " / " | " but not inside choice lists like {fast,slow}.
-    pieces = [p.strip() for p in re.split(r"(?:,\s*|\s+\|\s+|\s+/\s+)(?![^{]*\})", spec) if p.strip()]
-    if not pieces:
-        return None
-    opt = Option(spec=spec.strip())
-    for piece in pieces:
-        m = _FLAG_RE.match(piece)
-        if not m:
+def _set_metavar(opt: Option, metavar: str, optional: bool) -> None:
+    if opt.metavar is None:
+        opt.metavar = metavar
+    opt.optional_value = opt.optional_value or optional  # "-C NUM, --context[=NUM]"
+
+
+def _parse_option_line(line: str) -> Option | None:
+    """Parse an option line like "-n, --name=STRING   description".
+
+    The flag column ends at a wide gap (2+ spaces or a tab), at " : " or " = ",
+    or at the first word that can't be a flag or an argument name. A description
+    after a single space is only accepted after an argument like <json>, so prose
+    that happens to start with a dash isn't mistaken for an option.
+    """
+    opt = Option()
+    pos, n = 0, len(line)
+    last = None  # previous piece: "flag" | "arg" | "sep"
+    desc = ""
+    while pos < n:
+        ws = _WS_RE.match(line, pos).end()
+        if ws > pos and opt.aliases and ("\t" in line[pos:ws] or ws - pos >= 2):
+            desc = line[ws:]
+            break
+        spaced = ws > pos
+        pos = ws
+        if pos >= n:
+            break
+        if opt.aliases and line[pos] in ":=" and (pos + 1 == n or line[pos + 1].isspace()):
+            desc = line[pos + 1:]
+            break
+        m = _SPEC_TOKEN_RE.match(line, pos)
+        end = m.end()
+        at_boundary = end >= n or line[end].isspace() or line[end] in ",|"
+
+        if m.group("flag") and at_boundary:
+            flag = m.group("flag").removesuffix("...")  # "--verbose..." means repeatable
+            if last in ("flag", "arg") and spaced:
+                # Spellings joined only by a space ("-n --new-window") must be short then long;
+                # anything else is a list of separate flags in prose (find's help).
+                if not (last == "flag" and len(opt.aliases) == 1 and opt.short and flag.startswith("--")):
+                    return None
+            opt.aliases.append(flag)
+            if flag.startswith("--") or len(flag) > 2:  # -version (java, find) counts as long
+                opt.long = opt.long or flag
+            else:
+                opt.short = opt.short or flag
+            if m.group("attached"):
+                _set_metavar(opt, *_metavar(m.group("attached")))
+                last = "arg"
+            else:
+                last = "flag"
+        elif not opt.aliases:
             return None
-        flag, rest = m.group("flag"), m.group("rest")
-        if flag.endswith("..."):  # "--verbose..." means repeatable
-            flag, rest = flag[:-3], rest
-        parsed = _parse_arg(rest)
-        if parsed is None:
-            metavar, optional = None, False
+        elif m.group("sep"):
+            last = "sep"
+        elif m.group("winflag"):
+            pass
+        elif m.group("angle") or m.group("square") or m.group("brace"):
+            text = m.group(0)
+            if line.startswith("...", end):  # <file>...
+                end += 3
+            if text.startswith("{"):
+                _set_metavar(opt, text, False)
+            elif text.startswith("[") and not spaced and last == "arg":
+                pass  # "<var>[:<type>]" describes the same value, it doesn't make it optional
+            else:
+                _set_metavar(opt, *_metavar(text))
+            last = "arg"
         else:
-            metavar, optional = parsed
-            if metavar == "__bad__":
-                return None
-        opt.aliases.append(flag)
-        if flag.startswith("--"):
-            opt.long = opt.long or flag
-        elif len(flag) == 2:
-            opt.short = opt.short or flag
-        else:  # single-dash long option like -version (java, find)
-            opt.long = opt.long or flag
-        if metavar is not None:
-            opt.metavar = opt.metavar or metavar
-            opt.optional_value = opt.optional_value or optional
+            if last == "sep":
+                return None  # "--unicode, respectively." is a wrapped sentence, not an option
+            word = m.group(0).removesuffix("...")
+            after = _WS_RE.match(line, end).end()
+            ends_column = (after >= n or after - end >= 2 or "\t" in line[end:after]
+                           or line[end:end + 1] == ","
+                           or (line[after:after + 1] in (":", "=") and line[after + 1:after + 2] in ("", " ")))
+            if opt.metavar is None and last == "flag" and at_boundary and (_CAPS_RE.fullmatch(word) or ends_column):
+                _set_metavar(opt, word, False)  # -o FILE, -o file
+                last = "arg"
+            else:
+                # The description starts after a single space.
+                if last != "arg" and not (word[:1].isupper() and opt.long):
+                    return None
+                desc = line[pos:]
+                break
+        pos = end
+
+    if not opt.aliases:
+        return None
+    opt.spec = line[:n - len(desc)].strip() if desc else line.strip()
+    opt.description = desc.strip()
     return opt
 
 
@@ -103,19 +173,16 @@ def parse_help(text: str) -> list[Option]:
     current: Option | None = None
     current_indent = 0
 
-    for raw in text.expandtabs(8).splitlines():
+    for raw in _OVERSTRIKE_RE.sub("", text).expandtabs(8).splitlines():
         stripped = raw.strip()
         if not stripped:
             current = None
             continue
 
         if stripped.startswith("-"):
-            parts = _COLUMN_GAP_RE.split(stripped, maxsplit=1)
-            spec = parts[0]
-            desc = parts[1].strip().lstrip(":").strip() if len(parts) > 1 else ""
-            opt = _parse_spec(spec)
+            opt = _parse_option_line(stripped)
             if opt is not None:
-                opt.description = desc
+                opt.description = re.sub(r"^[:=](\s|$)", "", opt.description).strip()
                 if opt.key not in seen:
                     seen.add(opt.key)
                     options.append(opt)
@@ -206,3 +273,103 @@ def parse_examples(text: str, program: str | None = None) -> list[Example]:
             seen.add(command)
             examples.append(Example(command, description))
     return examples
+
+
+@dataclass
+class Subcommand:
+    name: str  # e.g. "commit"
+    description: str = ""
+    aliases: list[str] = field(default_factory=list)  # other spellings, e.g. ["b"] for cargo's "build, b"
+
+    @property
+    def names(self) -> list[str]:
+        return [self.name, *self.aliases]
+
+
+_SUB_NAME = r"[A-Za-z][\w.:+-]*"
+_SUB_NAME_RE = re.compile(_SUB_NAME)
+# "Commands:", "Management Commands:", "Most used commands:",
+# "These are common Git commands used in various situations:"
+_COMMANDS_HEADER_RE = re.compile(r"^(?P<title>(?!-).*\b(?:sub-?)?commands?\b.*?)\s*:\s*$", re.IGNORECASE)
+# Headings without a colon (VS Code's "Subcommands") must be short and title-like,
+# so a sentence ending in "commands" isn't taken for one.
+_BARE_COMMANDS_HEADER_RE = re.compile(r"^(?:[A-Z][\w-]*(?: [\w-]+){0,2} )?(?:[Ss]ub-?)?[Cc]ommands?$")
+_CHOICES_RE = re.compile(r"^\{(?P<names>[\w.:+-]+(?:,[\w.:+-]+)*)\}(?:\s{2,}.*)?$")  # argparse "{add,remove}"
+_ENTRY_SPLIT_RE = re.compile(r"\s{2,}|\t|\s+-\s+")
+_ENTRY_HEAD_RE = re.compile(rf"(?P<names>{_SUB_NAME}\*?(?:,\s*{_SUB_NAME})*)(?P<rest>.*)")
+# What may follow a subcommand's name in its column: [PATTERN...], UNIT..., <file>, (rm), KEY=VALUE
+_SUB_ARG_RE = re.compile(r"[\[<({|].*|[A-Z][A-Z0-9_.|=\[\]-]*(?:\.\.\.)?|\.\.\.")
+
+
+def parse_subcommands(text: str) -> list[Subcommand]:
+    """Subcommands listed under a "Commands:"-style heading (git, docker, uv, pip, apt, systemctl,
+    argparse, cargo), including comma-separated lists (npm, snap)."""
+    subs: list[Subcommand] = []
+    seen: set[str] = set()
+    in_section, header_indent, allowed = False, 0, None
+    current: Subcommand | None = None
+    current_indent = 0
+
+    def add(names: list[str], desc: str) -> Subcommand | None:
+        names = [n.rstrip("*") for n in names]  # docker marks plugins as "buildx*"
+        if allowed is not None and names[0] not in allowed:
+            return None
+        if names[0] in seen or (names[0].isupper() and len(names[0]) > 1):  # "COMMAND" placeholder
+            return None
+        seen.update(names)
+        sub = Subcommand(names[0], desc, names[1:])
+        subs.append(sub)
+        return sub
+
+    for raw in _OVERSTRIKE_RE.sub("", text).expandtabs(8).splitlines():
+        stripped = raw.strip()
+        indent = _indent(raw)
+        if not stripped:
+            current = None
+            continue
+        if indent <= 4 and (_COMMANDS_HEADER_RE.match(stripped)
+                            or (indent == 0 and _BARE_COMMANDS_HEADER_RE.match(stripped))):
+            in_section, header_indent, allowed, current = True, indent, None, None
+            continue
+        m = _CHOICES_RE.match(stripped)
+        if m:
+            in_section, header_indent, current = True, indent, None
+            allowed = set(m.group("names").split(","))
+            continue
+        if not in_section:
+            continue
+        if stripped.startswith("-"):  # options: the command list is over
+            in_section = False
+            continue
+        if indent <= header_indent:
+            if stripped.endswith(":") and not re.search(r":\s", stripped):
+                in_section = False  # "Options:", "Examples:"
+            current = None  # git's group headings, prose
+            continue
+        if current is not None and indent > current_indent:
+            current.description = f"{current.description} {stripped}".strip()  # wrapped description
+            continue
+
+        # "Basics: find, info, install" (snap) or "access, adduser, audit," (npm)
+        listing = re.sub(r"^[^:,]*:\s+", "", stripped).rstrip(",")
+        items = [i.strip() for i in listing.split(",")]
+        if len(items) >= 2 and all(_SUB_NAME_RE.fullmatch(i) for i in items):
+            for item in items:
+                add([item], "")
+            current = None
+            continue
+
+        parts = _ENTRY_SPLIT_RE.split(stripped, maxsplit=1)
+        head, desc = parts[0], (parts[1].strip() if len(parts) > 1 else "")
+        m = _ENTRY_HEAD_RE.fullmatch(head)
+        rest = m.group("rest").split() if m else []
+        if not m or not all(_SUB_ARG_RE.fullmatch(t) for t in rest):
+            current = None  # prose, not an entry
+            continue
+        names = [n.strip() for n in m.group("names").split(",")]
+        for t in rest:  # argparse aliases: "remove (rm)"
+            if t.startswith("(") and t.endswith(")") or t.startswith("(") and t.endswith("),"):
+                names += [a for a in re.split(r"[\s,()]+", t) if a]
+        current = add(names, desc)
+        current_indent = indent
+    return subs

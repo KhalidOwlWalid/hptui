@@ -146,3 +146,43 @@ def test_cluster_ending_in_value_option():
     assert remove_option("help2man -Nlf in.txt prog", BY["f"], OPTS) == "help2man -Nl prog"
     assert remove_option("help2man -Nlf in.txt prog", BY["no-info"], OPTS) == "help2man -lf in.txt prog"
     assert remove_option("help2man -fin.txt", BY["f"], OPTS) == "help2man"
+
+
+def test_parse_varied_help_styles():
+    text = """\
+  -d --diff <file> <file>                    Compare two files with each
+                                             other.
+  -n --new-window                            Force to open a new window.
+  -g --goto <file:line[:character]>          Open a file at the path.
+  --sync <on | off>                       Turn sync on or off.
+  --add-mcp <json> Adds a server definition to the user profile.
+  -e script, --expression=script
+                 add the script to the commands to be executed
+-c cmd : program passed in as string
+  -n, --lines=[-]NUM       print the first NUM lines
+  -c, -C NUM, --context[=NUM]  output NUM lines of context
+  -A|--record-avail  <.deb file name>...
+      --stderr=e|a|c         change stderr output mode
+  --title=...                 the process title
+  -D <var>[:<type>]=<value>    = Create or update a cmake cache entry.
+
+            --unicode, respectively.
+-amin N -anewer FILE -atime N -cmin N
+-readable -writable -executable
+"""
+    got = {o.key: (o.aliases, o.metavar, o.optional_value, o.description) for o in parse_help(text)}
+    assert got == {
+        "--diff": (["-d", "--diff"], "file", False, "Compare two files with each other."),
+        "--new-window": (["-n", "--new-window"], None, False, "Force to open a new window."),
+        "--goto": (["-g", "--goto"], "file:line[:character]", False, "Open a file at the path."),
+        "--sync": (["--sync"], "on | off", False, "Turn sync on or off."),
+        "--add-mcp": (["--add-mcp"], "json", False, "Adds a server definition to the user profile."),
+        "--expression": (["-e", "--expression"], "script", False, "add the script to the commands to be executed"),
+        "-c": (["-c"], "cmd", False, "program passed in as string"),
+        "--lines": (["-n", "--lines"], "[-]NUM", False, "print the first NUM lines"),
+        "--context": (["-c", "-C", "--context"], "NUM", True, "output NUM lines of context"),
+        "--record-avail": (["-A", "--record-avail"], None, False, "<.deb file name>..."),
+        "--stderr": (["--stderr"], "e|a|c", False, "change stderr output mode"),
+        "--title": (["--title"], "VALUE", False, "the process title"),
+        "-D": (["-D"], "var", False, "Create or update a cmake cache entry."),
+    }

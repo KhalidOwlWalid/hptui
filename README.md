@@ -108,7 +108,10 @@ The option list uses vim-style keys. Arrow keys work everywhere too.
 | option list  | `h`                         | uncheck option                                  |
 | option list  | `/`                         | quick search                                    |
 | option list  | `i` / `a`                   | edit the command box                            |
-| option list  | `Esc`                       | clear filter                                    |
+| option list  | `l` / `Enter` on a `›` row  | open that subcommand's page                     |
+| option list  | `h` on the `●` row          | remove the subcommand (and what follows it)     |
+| option list  | `Esc`                       | clear filter, else back to the parent command   |
+| option list  | `Backspace`                 | back to the parent command                      |
 | option list  | `?`                         | show every keybinding (also from history)       |
 | option list  | `q`                         | quit without output                             |
 | search       | type, `Backspace`, `Ctrl-W` | edit the query                                  |
@@ -117,6 +120,7 @@ The option list uses vim-style keys. Arrow keys work everywhere too.
 | search       | `Esc`                       | stop typing but keep results to browse with j/k |
 | option list  | `H` (or `Ctrl-R` anywhere)  | open this program's command history             |
 | option list  | `E`                         | open the examples from the help page            |
+| option list  | `D`                         | details: read this page's whole help text       |
 | history      | `j`/`k`, `g`/`G`, `/`       | move, jump, search (same as the option list)    |
 | history      | `Enter` / `l`               | load the command into the box to tweak it       |
 | history      | `r` / `Ctrl-S`              | run the command as-is                           |
@@ -131,6 +135,29 @@ The option list uses vim-style keys. Arrow keys work everywhere too.
 The command box is the source of truth: you can type options straight into
 it and the checkboxes and value boxes follow. Values with spaces or special
 characters are quoted automatically (`--output="my file"`, `~/"My Docs"`).
+
+## Subcommands
+
+Programs like `git`, `docker`, `uv`, `pip`, `apt` and `systemctl` list
+subcommands in their help. They show up at the top of the list (`› commit`).
+Open one with `l` / `Enter` to get a page with that subcommand's own options,
+loaded from `git commit -h` (or `docker container --help`, and so on). `Esc` or
+`Backspace` goes back to the parent page, and the subcommand in use is marked
+with `●`. Pages can nest (`docker container ls`).
+
+Each page only edits its own part of the command, so in
+`git -C repo commit -m "msg"` the git page owns `-C repo` and the commit page
+owns `-m "msg"`. Options ticked on the git page go before `commit`.
+
+`hptui git commit` opens straight on the commit page, with git's page behind
+it. Loading a history entry or example opens the page of the subcommand it uses.
+
+## Details
+
+`D` opens the current page's whole help text (the program's description,
+usage, notes and anything else that isn't an option), scrollable with
+`j`/`k`, `Ctrl-D`/`Ctrl-U` and `g`/`G`. On a subcommand page it shows that
+subcommand's help. `Esc` or `D` closes it, and `?` switches to the key reference.
 
 ## Examples
 

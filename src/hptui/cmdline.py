@@ -155,6 +155,46 @@ def quote(value: str, posix: bool | None = None) -> str:
     return _double_quote(value)
 
 
+@dataclass(frozen=True)
+class Scope:
+    """The part of a command that belongs to one (sub)command's page.
+
+    For `git -C dir commit -m x`, the git page owns `-C dir` and the commit page
+    owns `-m x`. `path` is the subcommand words leading to the page ("commit"),
+    `stop` the page's own subcommand names, which end its part of the command.
+    """
+
+    path: tuple[str, ...] = ()
+    stop: frozenset[str] = frozenset()
+
+    def locate(self, tokens: list[Token]) -> tuple[list[int], int, int]:
+        """(indices of the path words, first token of this page, first token after it)."""
+        found, i = [], 1  # token 0 is the program
+        for word in self.path:
+            k = next((k for k in range(i, len(tokens))
+                      if tokens[k].value == word and not tokens[k].raw.startswith("-")), None)
+            if k is None:  # the user edited the subcommand away: this page owns nothing
+                return found, len(tokens), len(tokens)
+            found.append(k)
+            i = k + 1
+        j = i
+        while j < len(tokens) and not (tokens[j].value in self.stop and not tokens[j].raw.startswith("-")):
+            if tokens[j].value == "--":
+                j = len(tokens)
+                break
+            j += 1
+        return found, i, j
+
+    def subcommand_token(self, text: str) -> Token | None:
+        """The token naming one of this page's subcommands, if the command has one."""
+        tokens = tokenize(text)
+        _, _, j = self.locate(tokens)
+        return tokens[j] if j < len(tokens) else None
+
+
+ROOT = Scope()
+
+
 def _alias_map(options: list[Option]) -> dict[str, Option]:
     amap: dict[str, Option] = {}
     for opt in options:
@@ -167,12 +207,14 @@ def _looks_like_option(tok: Token) -> bool:
     return tok.raw.startswith("-") and len(tok.raw) > 1
 
 
-def find_occurrences(text: str, options: list[Option]) -> list[Occurrence]:
-    """Find every known option in the command. The first token (the program) is skipped."""
+def find_occurrences(text: str, options: list[Option], scope: Scope = ROOT) -> list[Occurrence]:
+    """Find every known option in the part of the command that `scope` covers
+    (by default everything after the program)."""
     amap = _alias_map(options)
     tokens = tokenize(text)
+    _, i, end = scope.locate(tokens)
+    tokens = tokens[:end]
     found: list[Occurrence] = []
-    i = 1
     while i < len(tokens):
         tok = tokens[i]
         t = tok.value
@@ -243,10 +285,10 @@ def find_occurrences(text: str, options: list[Option]) -> list[Occurrence]:
     return found
 
 
-def occurrences_by_key(text: str, options: list[Option]) -> dict[str, Occurrence]:
+def occurrences_by_key(text: str, options: list[Option], scope: Scope = ROOT) -> dict[str, Occurrence]:
     """First occurrence of each option, in the order they appear."""
     result: dict[str, Occurrence] = {}
-    for occ in find_occurrences(text, options):
+    for occ in find_occurrences(text, options, scope):
         result.setdefault(occ.option.key, occ)
     return result
 
@@ -274,17 +316,20 @@ def _append(text: str, piece: str) -> str:
     return text + piece
 
 
-def add_option(text: str, opt: Option) -> str:
-    """Append an option. Options that need a value get "--name=" (or "-n " for short-only options)."""
+def add_option(text: str, opt: Option, scope: Scope = ROOT) -> str:
+    """Add an option at the end of the scope's part of the command (before any subcommand).
+    Options that need a value get "--name=" (or "-n " for short-only options)."""
     flag = opt.long or opt.short or opt.spec
-    if opt.takes_value and not opt.optional_value and flag.startswith("--"):
-        return _append(text, flag + "=")
-    return _append(text, flag)
+    piece = flag + "=" if opt.takes_value and not opt.optional_value and flag.startswith("--") else flag
+    sub = scope.subcommand_token(text)
+    if sub is not None:  # `git commit` + --no-pager -> `git --no-pager commit`
+        return text[:sub.start] + piece + " " + text[sub.start:]
+    return _append(text, piece)
 
 
-def remove_option(text: str, opt: Option, options: list[Option] | None = None) -> str:
+def remove_option(text: str, opt: Option, options: list[Option] | None = None, scope: Scope = ROOT) -> str:
     """Remove every occurrence of an option (and its value)."""
-    occs = [o for o in find_occurrences(text, options or [opt]) if o.option is opt]
+    occs = [o for o in find_occurrences(text, options or [opt], scope) if o.option is opt]
     for occ in sorted(occs, key=lambda o: (o.start, o.cluster_pos or 0), reverse=True):
         if occ.style == "cluster_value" and occ.value_start is not None:
             # drop the value first: it sits to the right, so the letter's position is unchanged
@@ -302,12 +347,13 @@ def remove_option(text: str, opt: Option, options: list[Option] | None = None) -
     return text
 
 
-def set_value(text: str, opt: Option, value: str, options: list[Option] | None = None) -> str:
+def set_value(text: str, opt: Option, value: str, options: list[Option] | None = None,
+              scope: Scope = ROOT) -> str:
     """Set an option's value, adding the option if it is not in the command yet."""
-    occ = occurrences_by_key(text, options or [opt]).get(opt.key)
+    occ = occurrences_by_key(text, options or [opt], scope).get(opt.key)
     if occ is None:
-        text = add_option(text, opt)
-        occ = occurrences_by_key(text, options or [opt]).get(opt.key)
+        text = add_option(text, opt, scope)
+        occ = occurrences_by_key(text, options or [opt], scope).get(opt.key)
         assert occ is not None
 
     if occ.style == "eq":

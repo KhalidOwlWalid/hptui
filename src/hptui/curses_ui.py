@@ -6,9 +6,9 @@ import curses
 
 from .parser import Option
 from .session import (
-    ESC, LineEdit, Segment, Session, command_kinds, fit_scroll, help_lines, history_empty_message,
-    history_header, history_segments, history_status, key_hints, new_session, option_segments,
-    options_header, runs, spec_width, title_segments,
+    ESC, LineEdit, Segment, Session, command_kinds, fit_scroll, history_empty_message,
+    history_header, history_segments, history_status, key_hints, list_empty_message, list_segments,
+    new_session, options_header, reader_segments, reader_title, runs, title_segments,
 )
 
 # kind -> (256-colour fg, 8-colour fg, extra attrs). None = terminal default (dimmed in 8-colour mode).
@@ -133,12 +133,12 @@ def _draw_keybar(win, s: Session, theme: Theme) -> None:
         x = _put(win, h - 1, x, f" {desc}", theme.attr("dim"))
 
 
-def draw(win, s: Session, theme: Theme, title: str) -> None:
+def draw(win, s: Session, theme: Theme) -> None:
     win.erase()
     h, w = win.getmaxyx()
     cursor_pos: tuple[int, int] | None = None
 
-    _put_segments(win, 0, 0, title_segments(title), theme)
+    _put_segments(win, 0, 0, title_segments(s.title()), theme)
 
     # command box, syntax highlighted
     y = 2
@@ -146,7 +146,7 @@ def draw(win, s: Session, theme: Theme, title: str) -> None:
     focused = s.focus == "cmd" and not s.hist_open and not s.help_open
     _put(win, y, 0, prompt, theme.attr("accent" if focused else "dim"))
     text, col = s.cmd.visible(w - len(prompt) - 1)
-    kinds = command_kinds(s.cmd.text, s.options)[s.cmd.scroll:s.cmd.scroll + len(text)]
+    kinds = command_kinds(s.cmd.text, s.options, s.scope)[s.cmd.scroll:s.cmd.scroll + len(text)]
     _put_segments(win, y, len(prompt), runs(text, kinds), theme)
     if focused:
         cursor_pos = (y, len(prompt) + col)
@@ -169,7 +169,6 @@ def draw(win, s: Session, theme: Theme, title: str) -> None:
 def draw_options(win, s: Session, theme: Theme, y: int) -> tuple[int, int] | None:
     h, w = win.getmaxyx()
     cursor_pos = None
-    occs = s.occurrences()
 
     # one input box per checked option that takes a value
     value_opts = s.value_options()
@@ -202,32 +201,25 @@ def draw_options(win, s: Session, theme: Theme, y: int) -> tuple[int, int] | Non
     y += 1
 
     list_h = max(1, h - y - 2)
-    spec_w = spec_width(items, w)
-    rows = [option_segments(o, o.key in occs, spec_w, w, s.query) for o in items]
+    rows = list_segments(s, w)
     s.list_scroll = fit_scroll([len(r) for r in rows], s.list_index, s.list_scroll, list_h)
     _draw_rows(win, y, list_h, rows, s.list_scroll, s.list_index if s.focus == "list" else None, theme)
     if not items:
-        _put(win, y, 2, "no options match", theme.attr("dim"))
+        _put(win, y, 2, list_empty_message(s), theme.attr("dim"))
     return cursor_pos
 
 
 def draw_help(win, s: Session, theme: Theme, y: int) -> None:
     h, w = win.getmaxyx()
-    lines = help_lines(w)
+    lines = reader_segments(s, w)
     avail = max(1, h - y - 2)
     s.help_scroll = min(s.help_scroll, max(0, len(lines) - avail))
-    x = _put(win, y, 0, "Keys", theme.attr("section"))
+    x = _put(win, y, 0, reader_title(s), theme.attr("section"))
     if len(lines) > avail:
         shown = min(len(lines), s.help_scroll + avail)
         _put(win, y, x + 2, f"lines {s.help_scroll + 1}-{shown} of {len(lines)} · j/k to scroll", theme.attr("dim"))
-    for row, (text, kind, key_end) in enumerate(lines[s.help_scroll:s.help_scroll + avail]):
-        if kind == "section":
-            _put(win, y + 1 + row, 0, text, theme.attr("section"))
-        elif kind == "key":
-            x = _put(win, y + 1 + row, 0, text[:key_end], theme.attr("key"))
-            _put(win, y + 1 + row, x, text[key_end:])
-        else:
-            _put(win, y + 1 + row, 0, text)
+    for row, line in enumerate(lines[s.help_scroll:s.help_scroll + avail]):
+        _put_segments(win, y + 1 + row, 0, line, theme)
 
 
 def draw_history(win, s: Session, theme: Theme, y: int) -> tuple[int, int] | None:
@@ -291,10 +283,14 @@ def run(
     open_examples: bool = False,
     standalone: bool = False,
     examples: list | None = None,
+    subcommands: list | None = None,
+    loader=None,
+    help_text: str = "",
 ) -> Session:
     """Show the curses TUI. The returned session's .result is the final command (None if cancelled)."""
     s = new_session(options, command, program=program, open_history=open_history,
-                    open_examples=open_examples, standalone=standalone, examples=examples)
+                    open_examples=open_examples, standalone=standalone, examples=examples,
+                    subcommands=subcommands, loader=loader, title=title, help_text=help_text)
 
     def main(stdscr) -> None:
         try:
@@ -305,7 +301,7 @@ def run(
         stdscr.keypad(True)
         theme = Theme()
         while not s.done:
-            draw(stdscr, s, theme, title or command or "history")
+            draw(stdscr, s, theme)
             try:
                 key = _read_key(stdscr)
             except curses.error:

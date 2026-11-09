@@ -18,9 +18,9 @@ from textual.widgets import Static
 from . import keys
 from .parser import Option
 from .session import (
-    ESC, LineEdit, Segment, Session, command_kinds, fit_scroll, help_lines, history_empty_message,
-    history_header, history_segments, history_status, key_hints, new_session, option_segments,
-    options_header, runs, spec_width, title_segments,
+    ESC, LineEdit, Segment, Session, command_kinds, fit_scroll, history_empty_message,
+    history_header, history_segments, history_status, key_hints, list_empty_message, list_segments,
+    new_session, options_header, reader_segments, reader_title, runs, title_segments,
 )
 
 _KEYS = {
@@ -102,7 +102,7 @@ class CommandBox(SessionView):
         s = self.s
         focused = s.focus == "cmd" and not s.hist_open and not s.help_open
         text = Text(self.PROMPT, style=style("accent" if focused else "dim"))
-        kinds = command_kinds(s.cmd.text, s.options)
+        kinds = command_kinds(s.cmd.text, s.options, s.scope)
         text.append_text(_edit_text(s.cmd, self.size.width - len(self.PROMPT), focused, kinds=kinds))
         return text
 
@@ -224,10 +224,7 @@ class RowList(SessionView):
 
 class OptionsView(RowList):
     def rows(self, width: int) -> list[list[list[Segment]]]:
-        items = self.s.filtered()
-        occs = self.s.occurrences()
-        spec_w = spec_width(items, width)
-        return [option_segments(o, o.key in occs, spec_w, width, self.s.query) for o in items]
+        return list_segments(self.s, width)
 
     def index(self) -> int:
         return self.s.list_index
@@ -245,7 +242,7 @@ class OptionsView(RowList):
         return self.s.focus == "list"
 
     def empty_message(self) -> str:
-        return "no options match"
+        return list_empty_message(self.s)
 
     def activate(self, i: int) -> None:
         """Click: toggle the option (and jump to its value box when it needs one)."""
@@ -294,11 +291,10 @@ class HelpView(SessionView):
                border-subtitle-color: $text-muted; }
     """
 
-    def on_mount(self) -> None:
-        self.border_title = "Keys"
-
     def render(self) -> Text:
-        lines = help_lines(self.size.width + 1)
+        if self.border_title != reader_title(self.s):
+            self.call_later(setattr, self, "border_title", reader_title(self.s))
+        lines = reader_segments(self.s, self.size.width + 1)
         h = max(1, self.size.height)
         s = self.s
         s.help_scroll = min(s.help_scroll, max(0, len(lines) - h))
@@ -308,16 +304,10 @@ class HelpView(SessionView):
             # Changing the border mid-render isn't repainted; apply it right after.
             self.call_later(setattr, self, "border_subtitle", subtitle)
         out = Text()
-        for i, (text, kind, key_end) in enumerate(lines[s.help_scroll:shown]):
+        for i, line in enumerate(lines[s.help_scroll:shown]):
             if i:
                 out.append("\n")
-            if kind == "section":
-                out.append(text, style("section"))
-            elif kind == "key":
-                out.append(text[:key_end], style("key"))
-                out.append(text[key_end:])
-            else:
-                out.append(text)
+            out.append_text(segments_text(line))
         return out
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
@@ -353,13 +343,12 @@ class HptuiApp(App):
     #keys { height: 1; background: $panel; padding: 0 1; }
     """
 
-    def __init__(self, session: Session, title: str) -> None:
+    def __init__(self, session: Session) -> None:
         super().__init__()
         self.session = session
-        self.title_text = title
 
     def compose(self) -> ComposeResult:
-        yield Static(segments_text(title_segments(self.title_text)), id="title")
+        yield Static(segments_text(title_segments(self.session.title())), id="title")
         yield CommandBox()
         yield FieldsView()
         yield OptionsView()
@@ -428,6 +417,7 @@ class HptuiApp(App):
         hist.set_class(True, "-focused")
         hist.set_class(s.hist_searching, "-searching")
 
+        self.query_one("#title", Static).update(segments_text(title_segments(s.title())))
         status = self.query_one("#status", Static)
         status.update(s.message or (history_status(s) if s.hist_open and not s.help_open else ""))
         status.set_class(bool(s.message), "-message")
@@ -447,9 +437,13 @@ def run(
     open_examples: bool = False,
     standalone: bool = False,
     examples: list | None = None,
+    subcommands: list | None = None,
+    loader=None,
+    help_text: str = "",
 ) -> Session:
     """Show the Textual TUI. The returned session's .result is the final command (None if cancelled)."""
     s = new_session(options, command, program=program, open_history=open_history,
-                    open_examples=open_examples, standalone=standalone, examples=examples)
-    HptuiApp(s, title or command or "history").run()
+                    open_examples=open_examples, standalone=standalone, examples=examples,
+                    subcommands=subcommands, loader=loader, title=title, help_text=help_text)
+    HptuiApp(s).run()
     return s
