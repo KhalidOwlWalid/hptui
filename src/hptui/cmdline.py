@@ -316,11 +316,14 @@ def _append(text: str, piece: str) -> str:
     return text + piece
 
 
-def add_option(text: str, opt: Option, scope: Scope = ROOT) -> str:
-    """Add an option at the end of the scope's part of the command (before any subcommand).
+def add_option(text: str, opt: Option, scope: Scope = ROOT, before: int | None = None) -> str:
+    """Add an option at the end of the scope's part of the command (before any subcommand, or
+    before position `before`, e.g. the first positional argument).
     Options that need a value get "--name=" (or "-n " for short-only options)."""
     flag = opt.long or opt.short or opt.spec
     piece = flag + "=" if opt.takes_value and not opt.optional_value and flag.startswith("--") else flag
+    if before is not None:  # `hptui git commit` + -c -> `hptui -c git commit`
+        return text[:before] + piece + " " + text[before:]
     sub = scope.subcommand_token(text)
     if sub is not None:  # `git commit` + --no-pager -> `git --no-pager commit`
         return text[:sub.start] + piece + " " + text[sub.start:]
@@ -389,3 +392,70 @@ def set_value(text: str, opt: Option, value: str, options: list[Option] | None =
         return _splice(text, occ.start, occ.end, f"{flag}{quote(value)}")
 
     return text
+
+
+# ---- positional arguments -------------------------------------------------------------
+
+_STOP_TOKENS = {"|", "||", "&&", ";", "&", ">", ">>", "<", "2>", "2>&1", "&>", "|&"}
+
+
+def positional_tokens(text: str, options: list[Option], scope: Scope = ROOT) -> list[Token]:
+    """Words in the scope's part of the command that aren't options or option values."""
+    tokens = tokenize(text)
+    _, i, j = scope.locate(tokens)
+    spans = [(o.start, o.end) for o in find_occurrences(text, options, scope)]
+    out, after_dashes = [], False
+    for tok in tokens[i:j]:
+        if tok.raw in _STOP_TOKENS:
+            break  # `cmd args | less`: the rest belongs to another program
+        if tok.value == "--" and not after_dashes:
+            after_dashes = True
+            continue
+        if any(a <= tok.start < b for a, b in spans):
+            continue
+        if not after_dashes and tok.raw.startswith("-") and len(tok.raw) > 1:
+            continue  # an option hptui doesn't know
+        out.append(tok)
+    return out
+
+
+def positional_spans(text: str, positionals: list, options: list[Option],
+                     scope: Scope = ROOT) -> dict[str, list[Token]]:
+    """Which words belong to which positional: in order, a repeatable one takes the rest."""
+    toks = positional_tokens(text, options, scope)
+    result: dict[str, list[Token]] = {}
+    k = 0
+    for p in positionals:
+        if k >= len(toks):
+            break
+        if p.repeatable:
+            result[p.key] = toks[k:]
+            break
+        result[p.key] = [toks[k]]
+        k += 1
+    return result
+
+
+def positional_value(text: str, toks: list[Token], repeatable: bool) -> str:
+    """What the value box shows: the word, or for a repeatable one the words as typed."""
+    if not toks:
+        return ""
+    return text[toks[0].start:toks[-1].end] if repeatable else toks[0].value
+
+
+def set_positional(text: str, p, value: str, positionals: list, options: list[Option],
+                   scope: Scope = ROOT) -> str:
+    """Set (or with "" remove) a positional's value. A repeatable one's value is used as typed,
+    so several words can be given; a single one is quoted."""
+    toks = positional_spans(text, positionals, options, scope).get(p.key)
+    piece = value.strip() if p.repeatable else (quote(value) if value else "")
+    if toks:
+        if not piece:
+            return _cut(text, toks[0].start, toks[-1].end)
+        return _splice(text, toks[0].start, toks[-1].end, piece)
+    if not piece:
+        return text
+    sub = scope.subcommand_token(text)
+    if sub is not None:
+        return text[:sub.start] + piece + " " + text[sub.start:]
+    return _append(text.rstrip(), piece)

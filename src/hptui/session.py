@@ -12,8 +12,8 @@ import textwrap
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from . import cmdline, history, keys
-from .parser import Example, Option, Subcommand, parse_examples, parse_help, parse_subcommands
+from . import cmdline, custom, history, keys
+from .parser import Example, Option, Positional, Subcommand
 
 # Raw-mode control characters.
 CTRL_A, CTRL_C, CTRL_D, CTRL_E, CTRL_K, CTRL_N = "\x01", "\x03", "\x04", "\x05", "\x0b", "\x0e"
@@ -99,12 +99,14 @@ class Page:
     list_index: int = 0
     list_scroll: int = 0
     query: str = ""
+    names: list[str] = field(default_factory=list)  # the same path by main names (aliases resolved)
+    positionals: list[Positional] = field(default_factory=list)
 
 
 # Runs a program's help, e.g. ["git", "commit"] -> output of `git commit -h`.
 HelpLoader = Callable[[list[str]], str]
 
-Item = Option | Subcommand  # a row in the list
+Item = Option | Subcommand | Positional  # a row in the list
 
 
 @dataclass
@@ -141,11 +143,13 @@ class Session:
     # subcommands: each one opens a page with its own help; parent pages are kept on a stack
     subcommands: list[Subcommand] = field(default_factory=list)
     path: list[str] = field(default_factory=list)
+    names: list[str] = field(default_factory=list)  # path by main names, for parser files: ["remote", "remove"]
     parents: list[Page] = field(default_factory=list)
     loader: HelpLoader | None = None
     root_program: str = ""  # program to run for subcommand help, e.g. "git"
     title_text: str = ""
-    page_cache: dict[tuple[str, ...], tuple[list[Option], list[Subcommand], list[Example], str]] = \
+    positionals: list[Positional] = field(default_factory=list)
+    page_cache: dict[tuple[str, ...], tuple[list[Option], list[Subcommand], list[Example], list[Positional], str]] = \
         field(default_factory=dict)
 
     # ---- derived state -------------------------------------------------
@@ -167,15 +171,35 @@ class Session:
     def title(self) -> str:
         return " ".join([self.title_text, *self.path]).strip()
 
-    def value_options(self) -> list[Option]:
-        """Checked options that take a value, in command order. Each gets an input box."""
-        return [o.option for o in self.occurrences().values() if o.option.takes_value]
+    def positional_spans(self) -> dict[str, list[cmdline.Token]]:
+        return cmdline.positional_spans(self.cmd.text, self.positionals, self.options, self.scope)
+
+    def value_options(self) -> list[Option | Positional]:
+        """What gets an input box: positionals that have a value (or are being edited), then
+        checked options that take a value, in command order."""
+        spans = self.positional_spans()
+        pos = [p for p in self.positionals if p.key in spans or self.focus == f"field:{p.key}"]
+        return pos + [o.option for o in self.occurrences().values() if o.option.takes_value]
+
+    def field_values(self) -> dict[str, str]:
+        """Current value of everything that has an input box, read from the command."""
+        values = {k: o.value or "" for k, o in self.occurrences().items()}
+        for p in self.positionals:
+            toks = self.positional_spans().get(p.key)
+            if toks:
+                values[p.key] = cmdline.positional_value(self.cmd.text, toks, p.repeatable)
+        return values
+
+    def is_checked(self, item: Item) -> bool:
+        if isinstance(item, Positional):
+            return item.key in self.positional_spans()
+        return item.key in self.occurrences()
 
     def items(self) -> list[Item]:
-        return [*self.subcommands, *self.options]
+        return [*self.subcommands, *self.positionals, *self.options]
 
     def filtered(self) -> list[Item]:
-        """Rows of the list: subcommands first, then options, narrowed by the search."""
+        """Rows of the list: subcommands, positionals, then options, narrowed by the search."""
         q = self.query.lower()
         if not q:
             return self.items()
@@ -184,20 +208,21 @@ class Session:
 
     def sync_fields(self) -> None:
         """Refresh value boxes from the command text (except the one being edited)."""
-        occs = self.occurrences()
-        for opt in self.value_options():
-            box = self.fields.setdefault(opt.key, LineEdit())
-            if self.focus != f"field:{opt.key}":
-                box.set(occs[opt.key].value or "")
+        values = self.field_values()
+        boxed = self.value_options()
+        for item in boxed:
+            box = self.fields.setdefault(item.key, LineEdit())
+            if self.focus != f"field:{item.key}":
+                box.set(values.get(item.key, ""))
                 box.dirty = False
-        if self.focus.startswith("field:") and self.focus[6:] not in occs:
+        if self.focus.startswith("field:") and self.focus[6:] not in {i.key for i in boxed}:
             self.focus = "list"
 
     def focus_order(self) -> list[str]:
         return ["cmd"] + [f"field:{o.key}" for o in self.value_options()] + ["list"]
 
-    def option_by_key(self, key: str) -> Option:
-        return next(o for o in self.options if o.key == key)
+    def option_by_key(self, key: str) -> Option | Positional:
+        return next(o for o in [*self.positionals, *self.options] if o.key == key)
 
     # ---- actions ---------------------------------------------------------
 
@@ -207,8 +232,12 @@ class Session:
         key = self.focus[6:]
         box = self.fields.get(key)
         if box is not None and box.dirty:
-            self.cmd.set(cmdline.set_value(self.cmd.text, self.option_by_key(key), box.text, self.options,
-                                           self.scope))
+            item = self.option_by_key(key)
+            if isinstance(item, Positional):
+                self.cmd.set(cmdline.set_positional(self.cmd.text, item, box.text, self.positionals,
+                                                    self.options, self.scope))
+            else:
+                self.cmd.set(cmdline.set_value(self.cmd.text, item, box.text, self.options, self.scope))
             box.dirty = False
 
     def move_focus(self, step: int) -> None:
@@ -222,10 +251,22 @@ class Session:
     def toggle(self, opt: Item, jump_to_field: bool) -> None:
         if isinstance(opt, Subcommand):
             return self.open_subcommand(opt)
+        if isinstance(opt, Positional):
+            if self.is_checked(opt) and not jump_to_field:
+                self.cmd.set(cmdline.set_positional(self.cmd.text, opt, "", self.positionals, self.options,
+                                                    self.scope))
+            else:  # there's nothing to add without a value: go to its box
+                self.commit_field()
+                self.fields.setdefault(opt.key, LineEdit())
+                self.focus = f"field:{opt.key}"
+            return self.sync_fields()
         if opt.key in self.occurrences():
             self.cmd.set(cmdline.remove_option(self.cmd.text, opt, self.options, self.scope))
         else:
-            self.cmd.set(cmdline.add_option(self.cmd.text, opt, self.scope))
+            # options go before positional arguments: `cp -v SRC DST`
+            spans = self.positional_spans()
+            first = min((toks[0].start for toks in spans.values()), default=None)
+            self.cmd.set(cmdline.add_option(self.cmd.text, opt, self.scope, before=first))
             if opt.takes_value and jump_to_field:
                 self.fields[opt.key] = LineEdit()
                 self.focus = f"field:{opt.key}"
@@ -240,17 +281,27 @@ class Session:
 
     # ---- subcommand pages ----------------------------------------------------
 
-    def _load_page(self, path: list[str]) -> tuple[list[Option], list[Subcommand], list[Example], str]:
+    def _load_page(self, path: list[str], names: list[str]
+                   ) -> tuple[list[Option], list[Subcommand], list[Example], list[Positional], str]:
         key = tuple(path)
         if key not in self.page_cache:
             text = ""
-            if self.loader is not None and self.root_program:
+            try:
+                pasted = custom.help_text(self.root_program, names)  # a parser file for this page
+            except custom.SpecError:
+                pasted = None
+            if pasted is not None:
+                text = pasted
+            elif self.loader is not None and self.root_program:
                 try:
                     text = self.loader([self.root_program, *path])
                 except Exception:  # the program vanished, timed out, ...
                     text = ""
-            self.page_cache[key] = (parse_help(text), parse_subcommands(text),
-                                    parse_examples(text, self.root_program), text)
+            try:
+                parsed = custom.parse_page(text, self.root_program, names)
+            except custom.SpecError:  # the parser file broke mid-session; startup already checked it
+                parsed = custom.parse_page(text, None)
+            self.page_cache[key] = (*parsed, text)
         return self.page_cache[key]
 
     def open_subcommand(self, sub: Subcommand) -> None:
@@ -268,14 +319,17 @@ class Session:
         self._push_page([*self.path, word])
 
     def _push_page(self, path: list[str]) -> None:
+        sub = next((sub for sub in self.subcommands if path[-1] in sub.names), None)
+        names = [*self.names, sub.name if sub else path[-1]]
         self.parents.append(Page(self.options, self.subcommands, self.examples, self.path, self.help_text,
-                                 self.list_index, self.list_scroll, self.query))
-        self.options, self.subcommands, self.examples, self.help_text = self._load_page(path)
-        self.path = path
+                                 self.list_index, self.list_scroll, self.query, self.names, self.positionals))
+        (self.options, self.subcommands, self.examples, self.positionals,
+         self.help_text) = self._load_page(path, names)
+        self.path, self.names = path, names
         self.list_index, self.list_scroll, self.query, self.searching = 0, 0, "", False
         self.fields.clear()
         self.focus = "list"
-        if not self.options and not self.subcommands and not self.message:
+        if not self.options and not self.subcommands and not self.positionals and not self.message:
             self.message = f"no options found in the help for `{self.title()}`"
         self.sync_fields()
 
@@ -286,7 +340,7 @@ class Session:
         self.commit_field()
         page = self.parents.pop()
         self.options, self.subcommands, self.examples, self.path = page.options, page.subcommands, page.examples, page.path
-        self.help_text = page.help_text
+        self.help_text, self.names, self.positionals = page.help_text, page.names, page.positionals
         self.list_index, self.list_scroll, self.query = page.list_index, page.list_scroll, page.query
         self.searching = False
         self.fields.clear()
@@ -432,6 +486,9 @@ class Session:
             if isinstance(current, Subcommand):
                 if current is self.active_subcommand():
                     self.remove_subcommand()
+            elif isinstance(current, Positional):
+                if self.is_checked(current):
+                    self.toggle(current, jump_to_field=False)
             elif current.key in self.occurrences():
                 self.toggle(current, jump_to_field=False)
         elif key == "/":
@@ -629,7 +686,12 @@ def wrap(text: str, width: int) -> list[str]:
 
 
 def _item_label(item: Item) -> str:
-    return item.spec if isinstance(item, Option) else ", ".join(item.names)
+    if isinstance(item, Option):
+        return item.spec
+    if isinstance(item, Positional):
+        label = item.label or item.name
+        return label if item.repeatable == ("..." in label) else f"{label} ..."
+    return ", ".join(item.names)
 
 
 def spec_width(items: list[Item], w: int) -> int:
@@ -688,7 +750,9 @@ def options_header(s: Session) -> tuple[str, str]:
     parts = []
     if s.subcommands:
         parts.append(f"Commands ({len(s.subcommands)})")
-    if s.options or not s.subcommands:
+    if s.positionals:
+        parts.append(f"Arguments ({len(s.positional_spans())}/{len(s.positionals)})")
+    if s.options or not (s.subcommands or s.positionals):
         parts.append(f"Options ({len(s.occurrences())}/{len(s.options)} selected)")
     header = " · ".join(parts)
     if s.searching:
@@ -749,6 +813,7 @@ HELP: list[tuple[str, list[tuple[str, str]]]] = [
         ("h", "uncheck option"),
         ("l on a › row", "open that subcommand's own options"),
         ("h on the ● row", "remove the subcommand (and what follows it)"),
+        ("l / Space on an argument", "type its value (h clears it)"),
         ("/", "search"),
         ("i / a", "edit the command box"),
         ("H", "history"),
@@ -903,6 +968,8 @@ def key_hints(s: Session) -> list[tuple[str, str]]:
         current = items[s.list_index] if 0 <= s.list_index < len(items) else None
         if isinstance(current, Subcommand):
             hints = [("j/k", "move"), ("l", "open"), ("/", "search"), ("^P", "command")]
+        elif isinstance(current, Positional):
+            hints = [("j/k", "move"), ("l", "set value"), ("h", "clear"), ("/", "search"), ("^P", "command")]
         else:
             hints = [("j/k", "move"), ("space", "toggle"), ("l", "edit"), ("/", "search"), ("^P", "command")]
         if s.parents:
@@ -1034,9 +1101,32 @@ def list_segments(s: Session, w: int) -> list[list[list[Segment]]]:
     active = s.active_subcommand()
     # commands and options each get their own column width: short names stay compact
     sub_w = spec_width([i for i in items if isinstance(i, Subcommand)], w)
-    opt_w = spec_width([i for i in items if isinstance(i, Option)], w)
-    return [subcommand_segments(i, i is active, sub_w, w, s.query) if isinstance(i, Subcommand)
-            else option_segments(i, i.key in occs, opt_w, w, s.query) for i in items]
+    opt_w = spec_width([i for i in items if not isinstance(i, Subcommand)], w)
+    spans = s.positional_spans()
+    rows = []
+    for i in items:
+        if isinstance(i, Subcommand):
+            rows.append(subcommand_segments(i, i is active, sub_w, w, s.query))
+        elif isinstance(i, Positional):
+            rows.append(positional_segments(i, i.key in spans, opt_w, w, s.query))
+        else:
+            rows.append(option_segments(i, i.key in occs, opt_w, w, s.query))
+    return rows
+
+
+def positional_segments(p: Positional, checked: bool, spec_w: int, w: int, query: str = "") -> list[list[Segment]]:
+    """A positional argument: checkbox, its name in the positional-argument colour, description."""
+    label = _item_label(p)
+    lines = _row_lines(f" {'[x]' if checked else '[ ]'} ", label, p.description, spec_w, w)
+    out = []
+    for n, line in enumerate(lines):
+        kinds = [""] * len(line)
+        if n == 0:
+            kinds[1:4] = ["check" if checked else "uncheck"] * 3
+            kinds[5:5 + len(label)] = ["arg"] * len(label)
+        _mark_matches(line, kinds, query)
+        out.append(runs(line, kinds))
+    return out
 
 
 def example_segments(ex: Example, w: int, query: str = "") -> list[list[Segment]]:
@@ -1092,9 +1182,11 @@ def new_session(
     loader: HelpLoader | None = None,
     title: str | None = None,
     help_text: str = "",
+    positionals: list[Positional] | None = None,
 ) -> Session:
     s = Session(options=options, cmd=LineEdit(), standalone=standalone, examples=examples or [],
-                subcommands=subcommands or [], loader=loader, help_text=help_text)
+                subcommands=subcommands or [], loader=loader, help_text=help_text,
+                positionals=positionals or [])
     s.program = history.program_of(command) if program is None else program
     s.cmd.set(command.rstrip() + " " if command else "")
     tokens = cmdline.tokenize(command)

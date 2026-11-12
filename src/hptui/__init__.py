@@ -8,9 +8,11 @@ import os
 import subprocess
 import sys
 
-from . import compat, config, history, keys
+from pathlib import Path
+
+from . import compat, config, custom, history, keys
 from .cmdline import quote
-from .parser import guess_command, parse_examples, parse_help, parse_subcommands
+from .parser import guess_command, parse_help, parse_subcommands
 
 __all__ = ["main"]
 
@@ -28,7 +30,8 @@ def _build_argparser() -> argparse.ArgumentParser:
             "  hptui --history                   pick a past command from any program\n"
             "  hptui --history help2man          start in help2man's history\n"
             "  hptui --examples tar              start in the examples from `tar --help`\n"
-            "  hptui --frontend=textual          switch to the Textual frontend (remembered)"
+            "  hptui --frontend=textual          switch to the Textual frontend (remembered)\n"
+            "  hptui parser --help               teach hptui how to read a program's help (custom parsers)"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -55,7 +58,8 @@ def _read_help(program: list[str]) -> str:
         return sys.stdin.read()
     if not program:
         raise SystemExit("hptui: pipe some --help output in, e.g. `help2man --help | hptui`, or pass a program name")
-    return _run_help(program)
+    pasted = custom.help_text(program[0], program[1:])
+    return pasted if pasted is not None else _run_help(program)
 
 
 # Help must come back as text: never wait on a pager, and don't let `git x --help`
@@ -96,8 +100,9 @@ def _starting_help(program: list[str]) -> str:
     """`hptui git commit` starts from git's help (commit's page opens on top of it, so Esc
     leads back to git); anything that isn't a listed subcommand gets `... --help` as before."""
     if len(program) > 1 and sys.stdin.isatty() and not program[1].startswith("-"):
-        root = _run_help(program[:1])
-        if any(program[1] in sub.names for sub in parse_subcommands(root)):
+        pasted = custom.help_text(program[0])
+        root = pasted if pasted is not None else _run_help(program[:1])
+        if any(program[1] in sub.names for sub in custom.parse_page(root, program[0])[1]):
             return root
     return _read_help(program)
 
@@ -131,7 +136,105 @@ def _finish(result: str | None, run_it: bool) -> None:
     compat.run_command(result)
 
 
+def _parser_argparser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="hptui parser",
+        description="Custom parsers: paste a program's help into a file, mark where its options, "
+                    "arguments, subcommands and examples are, and hptui uses that file for the program.",
+        epilog=(
+            "file format (the help, pasted exactly, then markers):\n"
+            "  usage: mytool [-h] [FILE ...]\n"
+            "  ...\n"
+            "  --- hptui ---\n"
+            '  positionals: after "positional arguments:" before "options:"\n'
+            '  options: after "options:"\n'
+            '  subcommands: after "Commands"\n'
+            '  examples: after "Examples"\n'
+            "  ignore: --bogus, help\n"
+            "\n"
+            "examples:\n"
+            "  hptui parser --init mytool        write mytool.txt from `mytool --help`, to add markers to\n"
+            "  hptui parser --check mytool.txt   show what the file gives, without installing it\n"
+            "  hptui parser --file mytool.txt    install it: `hptui mytool` uses it from now on\n"
+            '  hptui parser --file c.txt --program "git commit"   a file for a subcommand page\n'
+            "  hptui parser --list               installed parsers\n"
+            "  hptui parser --remove mytool      back to hptui's own parsing"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    action = p.add_mutually_exclusive_group(required=True)
+    action.add_argument("-f", "--file", type=Path, metavar="FILE", help="check a parser file and install it")
+    action.add_argument("--check", type=Path, metavar="FILE", help="show what a parser file gives, without installing it")
+    action.add_argument("--init", nargs="+", metavar="PROGRAM", help="write PROGRAM.txt from PROGRAM's help, ready for markers")
+    action.add_argument("-l", "--list", action="store_true", help="list installed parsers")
+    action.add_argument("--remove", nargs="+", metavar="PROGRAM", help="delete the installed parser for PROGRAM")
+    action.add_argument("--path", action="store_true", help="print the folder installed parsers live in")
+    p.add_argument("--program", help='what the file is for, e.g. "mytool" or "git commit" '
+                                     "(default: its program: line, else the usage line, else the file name)")
+    p.add_argument("-o", "--output", help="with --init: file to write (default: PROGRAM.txt here; - for stdout)")
+    p.add_argument("--force", action="store_true", help="with --init: overwrite an existing file")
+    return p
+
+
+def parser_main(argv: list[str]) -> None:
+    """`hptui parser ...`: manage custom parser files."""
+    args = _parser_argparser().parse_args(argv)
+    words = args.program.split() if args.program else None
+    if args.path:
+        print(custom.parsers_dir())
+    elif args.list:
+        files = custom.installed()
+        if not files:
+            print(f"no custom parsers installed (folder: {custom.parsers_dir()})")
+        for path in files:
+            print(f"{path.stem:20} {path}")
+    elif args.remove:
+        path = custom.remove(args.remove)
+        if path is None:
+            raise SystemExit(f"hptui: no custom parser installed for {' '.join(args.remove)}")
+        print(f"removed {path}")
+    elif args.init:
+        out = args.output or "-".join([compat.program_name(args.init[0]), *args.init[1:]]) + custom.SUFFIX
+        if out != "-" and Path(out).exists() and not args.force:
+            raise SystemExit(f"hptui: {out} already exists (use --force to overwrite)")
+        text = load_subcommand_help(args.init) if len(args.init) > 1 else _quiet_help(args.init[0])
+        if not text.strip():
+            print(f"hptui: `{' '.join(args.init)} --help` printed nothing; paste the help into the file yourself",
+                  file=sys.stderr)
+        content = custom.template(text, args.init)
+        if out == "-":
+            print(content, end="")
+        else:
+            Path(out).write_text(content, encoding="utf-8")
+            print(f"wrote {out}: add markers at the bottom, check it with `hptui parser --check {out}`, "
+                  f"then install it with `hptui parser --file {out}`")
+    else:
+        source = args.file or args.check
+        spec = custom.load_file(source, words)
+        for line in custom.summary(spec):
+            print(line)
+        if args.file:
+            _, dest, replaced = custom.install(source, words)
+            print(f"{'replaced' if replaced else 'installed'} {dest}")
+
+
+def _quiet_help(program: str) -> str:
+    try:
+        return _help_output([program], "--help")
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
 def main() -> None:
+    try:
+        if sys.argv[1:2] == ["parser"]:
+            return parser_main(sys.argv[2:])
+        _main()
+    except custom.SpecError as e:
+        raise SystemExit(f"hptui: bad parser file {e}")
+
+
+def _main() -> None:
     args = _build_argparser().parse_args()
     # Run when used directly in a terminal; print when captured, e.g. "$(hptui ls)".
     run_it = args.exec or (not args.print and sys.stdout.isatty())
@@ -163,24 +266,23 @@ def main() -> None:
         try:
             from .cmdline import tokenize
 
-            help_text = _run_help([tokenize(command)[0].value])
+            program = tokenize(command)[0].value
+            pasted = custom.help_text(program)
+            help_text = pasted if pasted is not None else _run_help([program])
         except SystemExit:
             help_text = ""  # program gone or no help: still let them edit the text
-        options = parse_help(help_text)
-        examples = parse_examples(help_text, history.program_of(command))
-        app = _run_on_tty(lambda: run(options, command, examples=examples, subcommands=parse_subcommands(help_text),
-                                      loader=load_subcommand_help, help_text=help_text))
+        options, subcommands, examples, positionals = custom.parse_page(help_text, history.program_of(command))
+        app = _run_on_tty(lambda: run(options, command, examples=examples, subcommands=subcommands,
+                                      loader=load_subcommand_help, help_text=help_text, positionals=positionals))
         return _finish(app.result, run_it)
 
     text = _starting_help(args.program)
-    options = parse_help(text)
-    subcommands = parse_subcommands(text)
-    if not options and not subcommands:
-        raise SystemExit("hptui: no options or subcommands found in the help text")
-
     command = args.command or " ".join(quote(a) for a in args.program) or guess_command(text) or "command"
-    examples = parse_examples(text, history.program_of(command))
+    options, subcommands, examples, positionals = custom.parse_page(text, history.program_of(command))
+    if not options and not subcommands and not positionals:
+        hint = f" (teach hptui with `hptui parser --init {history.program_of(command)}`)"
+        raise SystemExit(f"hptui: no options or subcommands found in the help text{hint}")
     app = _run_on_tty(lambda: run(options, command, open_history=args.history, open_examples=args.examples,
                                   examples=examples, subcommands=subcommands, loader=load_subcommand_help,
-                                  help_text=text))
+                                  help_text=text, positionals=positionals))
     _finish(app.result, run_it)

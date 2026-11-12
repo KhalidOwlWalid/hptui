@@ -19,6 +19,7 @@ PALETTE = {
     "punct": (61, None, 0),
     "value": (228, curses.COLOR_YELLOW, 0),
     "string": (84, curses.COLOR_GREEN, 0),
+    "arg": (215, None, 0),  # positional arguments (Dracula orange)
     "op": (203, curses.COLOR_RED, curses.A_BOLD),
     "metavar": (141, curses.COLOR_MAGENTA, 0),
     "check": (84, curses.COLOR_GREEN, curses.A_BOLD),
@@ -286,11 +287,13 @@ def run(
     subcommands: list | None = None,
     loader=None,
     help_text: str = "",
+    positionals: list | None = None,
 ) -> Session:
     """Show the curses TUI. The returned session's .result is the final command (None if cancelled)."""
     s = new_session(options, command, program=program, open_history=open_history,
                     open_examples=open_examples, standalone=standalone, examples=examples,
-                    subcommands=subcommands, loader=loader, title=title, help_text=help_text)
+                    subcommands=subcommands, loader=loader, title=title, help_text=help_text,
+                    positionals=positionals)
 
     def main(stdscr) -> None:
         try:

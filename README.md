@@ -110,6 +110,7 @@ The option list uses vim-style keys. Arrow keys work everywhere too.
 | option list  | `i` / `a`                   | edit the command box                            |
 | option list  | `l` / `Enter` on a `›` row  | open that subcommand's page                     |
 | option list  | `h` on the `●` row          | remove the subcommand (and what follows it)     |
+| option list  | `l` / `Space` on an argument | type its value (`h` clears it)                 |
 | option list  | `Esc`                       | clear filter, else back to the parent command   |
 | option list  | `Backspace`                 | back to the parent command                      |
 | option list  | `?`                         | show every keybinding (also from history)       |
@@ -159,6 +160,64 @@ usage, notes and anything else that isn't an option), scrollable with
 `j`/`k`, `Ctrl-D`/`Ctrl-U` and `g`/`G`. On a subcommand page it shows that
 subcommand's help. `Esc` or `D` closes it, and `?` switches to the key reference.
 
+## Custom parsers
+
+Some programs format their help in ways hptui can't follow. For those, paste
+the help into a text file and add a few lines that point at its sections. The
+installed file then becomes that program's help as far as hptui is concerned:
+`hptui <program>` reads it instead of running `--help`.
+
+```text
+usage: mytool [-h] [-o DIR] [file ...]
+...the rest of the help, pasted exactly...
+
+--- hptui ---
+positionals: after "positional arguments:" before "options:"
+options: after "options:"
+subcommands: after "Things you can do"
+examples: after "Try these" before "Notes"
+ignore: -h, --bogus
+```
+
+- Everything above `--- hptui ---` is the help text. You can edit it too,
+  e.g. to fix a line hptui misreads.
+- Each marker is `<kind>: after "<heading>"`, with an optional `before "<heading>"`.
+  The kinds are `options`, `positionals`, `subcommands` and `examples`. A heading
+  matches the first line that starts with that text, ignoring case. Without
+  `before`, the section ends at the next line indented no deeper than the
+  heading.
+- Inside a marked section, every entry is read as that kind: subcommands
+  don't need a "Commands:" heading, and every example line counts as an
+  example. Text that isn't marked is parsed as usual.
+- `ignore:` hides entries (flags, subcommand or argument names). `program:`
+  says which program the file is for, e.g. `program: git commit` for a
+  subcommand's page. Otherwise it's taken from the usage line, then the file
+  name. Lines starting with `#` are comments.
+
+```shell
+hptui parser --init mytool             # mytool.txt: the current help + marker hints
+hptui parser --check mytool.txt        # what the file gives, without installing it
+hptui parser --file mytool.txt         # install it
+hptui parser --init git commit         # git-commit.txt, for the `git commit` page
+hptui parser --list                    # installed parsers
+hptui parser --remove mytool           # back to hptui's own parsing
+```
+
+Installed files live in `~/.config/hptui/parsers/` (`%APPDATA%\hptui\parsers`
+on Windows, or `$HPTUI_PARSERS`), one per program or subcommand page, e.g.
+`mytool.txt` and `git commit.txt`. Markers that point at headings the help
+doesn't contain are reported with their line number when you check or install.
+
+## Positional arguments
+
+Arguments like `program` in `hptui [options] [program ...]` show up as rows
+under the subcommands. hptui finds them in argparse- and clap-style
+"positional arguments:" / "Arguments:" sections, or wherever a parser file's
+`positionals:` marker points. `l` or `Space` opens a value box. A single argument
+is quoted like any value, while a repeatable one (`program ...`) takes several
+words exactly as you type them. `h` clears it. Options you tick go before the
+arguments.
+
 ## Examples
 
 If the help page has an "Examples:" section (like `tar --help`), press `E` to
@@ -188,6 +247,6 @@ opens the full option editor with the command loaded.
 uv run pytest
 ```
 
-Code layout: `parser.py` reads help text, `cmdline.py` edits the command line,
+Code layout: `parser.py` reads help text, `custom.py` applies custom parser files, `cmdline.py` edits the command line,
 `history.py` and `config.py` handle storage, `session.py` holds all UI state
 and key handling, and `curses_ui.py` / `textual_ui.py` only draw it.

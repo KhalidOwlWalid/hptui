@@ -36,7 +36,7 @@ _STYLES = {
     "string": "#50fa7b", "op": "bold #ff5555", "metavar": "#bd93f9", "check": "bold #50fa7b",
     "uncheck": "#6272a4", "time": "#6272a4", "dim": "#6272a4", "match": "bold #282a36 on #f1fa8c",
     "section": "bold #ff79c6", "key": "bold #f1fa8c", "accent": "bold #8be9fd", "label": "#8be9fd",
-    "title": "bold #f1fa8c",
+    "title": "bold #f1fa8c", "arg": "#ffb86c",
 }
 STYLE = {k: Style.parse(v) for k, v in _STYLES.items()}
 CURSOR = Style(bgcolor="#44475a", bold=True)  # Dracula "current line"
@@ -440,10 +440,12 @@ def run(
     subcommands: list | None = None,
     loader=None,
     help_text: str = "",
+    positionals: list | None = None,
 ) -> Session:
     """Show the Textual TUI. The returned session's .result is the final command (None if cancelled)."""
     s = new_session(options, command, program=program, open_history=open_history,
                     open_examples=open_examples, standalone=standalone, examples=examples,
-                    subcommands=subcommands, loader=loader, title=title, help_text=help_text)
+                    subcommands=subcommands, loader=loader, title=title, help_text=help_text,
+                    positionals=positionals)
     HptuiApp(s).run()
     return s

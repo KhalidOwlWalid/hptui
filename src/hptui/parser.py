@@ -215,7 +215,7 @@ class Example:
 
 _EXAMPLES_RE = re.compile(r"^\s*(?:usage\s+)?examples?(?:\s+of\s+use)?\s*:?\s*$", re.IGNORECASE)
 _PROMPT_RE = re.compile(r"^[$%>]\s+")
-_INLINE_COMMENT_RE = re.compile(r"\s+#\s+")
+_INLINE_COMMENT_RE = re.compile(r"\s+#\s+|\s{3,}")  # "cmd  # what it does" or "cmd     what it does"
 
 
 def parse_examples(text: str, program: str | None = None) -> list[Example]:
@@ -373,3 +373,112 @@ def parse_subcommands(text: str) -> list[Subcommand]:
         current = add(names, desc)
         current_indent = indent
     return subs
+
+
+@dataclass
+class Positional:
+    """A positional argument, e.g. "program" in `hptui [options] [program ...]`."""
+
+    name: str
+    description: str = ""
+    repeatable: bool = False  # "program ...": takes several words
+    optional: bool = False  # "[dir]"
+    label: str = ""  # as written in the help, e.g. "[FILE]..."
+
+    @property
+    def key(self) -> str:
+        return f"arg:{self.name}"
+
+    @property
+    def metavar(self) -> str:  # value boxes show "<name>" when empty
+        return self.name + (" ..." if self.repeatable else "")
+
+    takes_value = True
+
+
+_POSITIONAL_HEAD_RE = re.compile(r"[\[<]*(?P<name>[A-Za-z_][\w.:-]*)[\]>]*(?:\s*\.\.\.|\s*\[[^\]]*\.\.\.\])?\]*")
+_POSITIONAL_HEADINGS = ("positional arguments:", "arguments:")
+
+
+def section_end(lines: list[str], heading: int) -> int:
+    """Index just past the section that starts after lines[heading]: it runs until the next
+    line that is indented no deeper than the heading (or, if entries sit at the heading's own
+    indent, until the next blank line)."""
+    indent = _indent(lines[heading]) if heading >= 0 else -1
+    k = heading + 1
+    while k < len(lines) and not lines[k].strip():
+        k += 1
+    if k < len(lines) and _indent(lines[k]) <= indent:
+        # entries at the heading's own indent: up to a blank line or the next "Heading:"
+        if lines[k].rstrip().endswith(":"):
+            return k
+        while k < len(lines) and lines[k].strip() and not lines[k].rstrip().endswith(":"):
+            k += 1
+        return k
+    while k < len(lines) and (not lines[k].strip() or _indent(lines[k]) > indent):
+        k += 1
+    return k
+
+
+def parse_positionals(text: str) -> list[Positional]:
+    """Entries of a positional-arguments section: "name   description", one per line.
+    Deeper-indented lines continue the description; argparse's "{a,b}" lines are skipped."""
+    found: list[Positional] = []
+    base: int | None = None
+    current: Positional | None = None
+    for raw in _OVERSTRIKE_RE.sub("", text).expandtabs(8).splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        indent = _indent(raw)
+        if base is None:
+            base = indent
+        if indent > base:
+            if current is not None:
+                current.description = f"{current.description} {stripped}".strip()
+            continue
+        current = None
+        parts = re.split(r"\s{2,}|\t", stripped, maxsplit=1)
+        head, desc = parts[0], (parts[1].strip() if len(parts) > 1 else "")
+        if head.startswith(("-", "{")):  # an option, or argparse's subcommand choices
+            continue
+        m = _POSITIONAL_HEAD_RE.fullmatch(head)
+        if not m:
+            continue
+        current = Positional(m.group("name"), desc, "..." in head, head.startswith("["), head)
+        if all(p.name != current.name for p in found):
+            found.append(current)
+    return found
+
+
+def apply_usage_hints(positionals: list[Positional], text: str) -> list[Positional]:
+    """argparse marks repeatable/optional positionals only in the usage line: `[program ...]`."""
+    usage, inside = [], False
+    for line in text.splitlines():
+        if re.match(r"^\s*usage:", line, re.IGNORECASE):
+            inside = True
+        elif inside and not line.strip():
+            break
+        if inside:
+            usage.append(line)
+    flat = " ".join(usage)
+    for p in positionals:
+        name = re.escape(p.name)
+        if re.search(rf"(?<![\w-]){name}\s*\.\.\.|\[{name}\s*\.\.\.\]|(?<![\w-]){name} \[{name} \.\.\.\]", flat):
+            p.repeatable = True
+        one_or_more = re.search(rf"(?<![\w-]){name} \[{name} \.\.\.\]", flat)  # argparse nargs="+"
+        if re.search(rf"\[{name}\b", flat) and not one_or_more:
+            p.optional = True
+    return positionals
+
+
+def builtin_positionals(text: str) -> list[Positional]:
+    """Positionals from argparse/clap style "positional arguments:" / "Arguments:" sections."""
+    lines = _OVERSTRIKE_RE.sub("", text).expandtabs(8).splitlines()
+    found: list[Positional] = []
+    for i, line in enumerate(lines):
+        if _indent(line) <= 2 and line.strip().lower() in _POSITIONAL_HEADINGS:
+            for p in parse_positionals("\n".join(lines[i + 1:section_end(lines, i)])):
+                if all(q.name != p.name for q in found):
+                    found.append(p)
+    return apply_usage_hints(found, text)
