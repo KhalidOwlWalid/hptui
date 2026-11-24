@@ -232,7 +232,8 @@ def remove(words: list[str]) -> Path | None:
 # ---- parsing with markers -------------------------------------------------------------------
 
 def builtin(text: str, program: str | None) -> Parsed:
-    return parse_help(text), parse_subcommands(text), parse_examples(text, program), builtin_positionals(text)
+    return (parse_help(text), parse_subcommands(text, program), parse_examples(text, program),
+            builtin_positionals(text))
 
 
 def _forced_subcommands(text: str) -> list[Subcommand]:

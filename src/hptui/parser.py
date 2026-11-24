@@ -201,12 +201,22 @@ def parse_help(text: str) -> list[Option]:
     return options
 
 
+_MAN_NAME_RE = re.compile(r"^\s+(?P<name>[\w.+-]+)(?:,\s*[\w.+-]+)*\s+\\?[-\u2010\u2013\u2014]\s")  # "   bundle - Ruby ..."
+
+
 def guess_command(text: str) -> str | None:
-    """Find the program name from a "Usage: prog ..." line."""
-    for line in text.splitlines():
+    """Find the program name from a "Usage: prog ..." line, else (for a man page printed by
+    --help) from its NAME section: "NAME" then "bundle - Ruby Dependency Management"."""
+    lines = _OVERSTRIKE_RE.sub("", text).splitlines()
+    for line in lines:
         m = _USAGE_RE.match(line)
         if m:
             return os.path.basename(m.group(1).strip("`'\""))
+    for i, line in enumerate(lines):
+        if line.strip() == "NAME" and _indent(line) == 0:
+            following = next((l for l in lines[i + 1:] if l.strip()), "")
+            m = _MAN_NAME_RE.match(following)
+            return m.group("name") if m else None
     return None
 
 
@@ -304,9 +314,10 @@ _ENTRY_HEAD_RE = re.compile(rf"(?P<names>{_SUB_NAME}\*?(?:,\s*{_SUB_NAME})*)(?P<
 _SUB_ARG_RE = re.compile(r"[\[<({|].*|[A-Z][A-Z0-9_.|=\[\]-]*(?:\.\.\.)?|\.\.\.")
 
 
-def parse_subcommands(text: str) -> list[Subcommand]:
+def parse_subcommands(text: str, program: str | None = None) -> list[Subcommand]:
     """Subcommands listed under a "Commands:"-style heading (git, docker, uv, pip, apt, systemctl,
-    argparse, cargo), including comma-separated lists (npm, snap)."""
+    argparse, cargo), including comma-separated lists (npm, snap), plus man-page style entries
+    ("bundle install(1)", for programs whose --help prints their man page)."""
     subs: list[Subcommand] = []
     seen: set[str] = set()
     in_section, header_indent, allowed = False, 0, None
@@ -375,6 +386,69 @@ def parse_subcommands(text: str) -> list[Subcommand]:
                 names += [a for a in re.split(r"[\s,()]+", t) if a]
         current = add(names, desc)
         current_indent = indent
+    for sub in _man_subcommands(text, program):
+        if not seen & set(sub.names):
+            seen.update(sub.names)
+            subs.append(sub)
+    return subs
+
+
+# "bundle install(1) bundle-install.1.html", "bundle console(1) (deprecated)": a man page's list of
+# subcommands, each the program's name, the subcommand and a man section, described below it.
+_MAN_ENTRY_RE = re.compile(r"(?P<prog>[A-Za-z][\w.+-]*) (?P<name>[A-Za-z][\w.:+-]*)\(\d\w*\)(?P<rest>\s.*)?")
+_MAN_ALIASES_RE = re.compile(r"\(aliases?:\s*(?P<names>[^)]*)\)", re.IGNORECASE)
+_HYPHENATED = ("\u2010", "\u00ad")  # man breaks a word across lines with these
+
+
+def _man_subcommands(text: str, program: str | None) -> list[Subcommand]:
+    """Man-page entries, found wherever they are (bundle lists them under PRIMARY COMMANDS and
+    UTILITIES). The first word must be the program; without one, the word most entries share
+    (at least two), so a stray "see foo(1)" in other help isn't taken for a subcommand."""
+    found: list[tuple[str, Subcommand]] = []
+    current: Subcommand | None = None
+    current_indent = 0
+    for raw in _OVERSTRIKE_RE.sub("", text).expandtabs(8).splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            current = None
+            continue
+        indent = _indent(raw)
+        m = _MAN_ENTRY_RE.fullmatch(stripped)
+        if m:
+            deprecated = "(deprecated)" in (m.group("rest") or "").lower()
+            current = Subcommand(m.group("name"), "(deprecated)" if deprecated else "")
+            current_indent = indent
+            found.append((m.group("prog"), current))
+        elif current is not None and indent > current_indent:
+            desc = current.description
+            if desc.endswith(_HYPHENATED):  # "in‐" + "stalled"
+                current.description = desc[:-1] + stripped
+            else:
+                current.description = f"{desc} {stripped}".strip()
+        else:
+            current = None
+    if not found:
+        return []
+    from . import compat
+
+    if program:
+        want = compat.program_name(program)
+        entries = [sub for prog, sub in found if compat.program_name(prog) == want]
+    else:
+        progs = [prog for prog, _ in found]
+        best = max(set(progs), key=progs.count)
+        entries = [sub for prog, sub in found if prog == best] if progs.count(best) >= 2 else []
+    subs: list[Subcommand] = []
+    seen: set[str] = set()
+    for sub in entries:
+        sub.description = " ".join(sub.description.split())  # man pages justify text with extra spaces
+        m = _MAN_ALIASES_RE.search(sub.description)
+        if m:  # "(aliases: bundle package, bundle pack)"
+            sub.aliases = [a.split()[-1] for a in m.group("names").split(",") if a.strip()]
+            sub.aliases = [a for a in sub.aliases if a != sub.name]
+        if not seen & set(sub.names):
+            seen.update(sub.names)
+            subs.append(sub)
     return subs
 
 
