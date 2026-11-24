@@ -1,0 +1,12 @@
+kigit gui - desktop app for browsing a KiCad project's history and diffing revisions
+
+USAGE
+    kigit gui [PROJECT_DIR]
+
+ARGUMENTS
+    [PROJECT_DIR]       KiCad project folder (default: the current directory)
+--- hptui ---
+# `kigit gui --help` prints the main help, so this file supplies the `kigit gui` page.
+# Install with: hptui parser --file "parsers/kigit gui.txt"
+program: kigit gui
+positionals: after "ARGUMENTS"

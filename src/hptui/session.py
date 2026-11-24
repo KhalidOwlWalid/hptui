@@ -136,6 +136,7 @@ class Session:
     help_scroll: int = 0
     reader: str = "keys"  # "keys" | "details"
     help_text: str = ""  # the current page's --help output
+    details_scroll: dict[tuple[str, ...], int] = field(default_factory=dict)  # where each page's --help tab was left
     edit_request: str | None = None  # standalone: command the user wants to edit
     # the same picker panel also lists examples parsed from the help page
     examples: list[Example] = field(default_factory=list)
@@ -491,6 +492,8 @@ class Session:
                     self.toggle(current, jump_to_field=False)
             elif current.key in self.occurrences():
                 self.toggle(current, jump_to_field=False)
+        elif key in ("[", "]"):
+            self.switch_tab(1 if key == "]" else -1)
         elif key == "/":
             self.searching = True
             self.list_index = 0
@@ -615,6 +618,8 @@ class Session:
             elif isinstance(key, str) and key.isprintable():
                 self.hist_query += key
                 self.hist_index = 0
+        elif key in ("[", "]"):
+            self.switch_tab(1 if key == "]" else -1)
         elif key == "l" and current:
             self.load_entry(current)
         elif key == "r" and current:
@@ -645,6 +650,46 @@ class Session:
             self.close_history()
         self.hist_index = max(0, min(self.hist_index, len(self.hist_filtered()) - 1))
 
+    # ---- tabs: Options · --help · Examples · History, switched with [ and ] ----------
+
+    def tabs(self) -> list[str]:
+        if self.standalone:
+            return []  # `hptui --history` has no help page
+        return ["options", "help", *(["examples"] if self.examples else []), "history"]
+
+    def current_tab(self) -> str:
+        """The tab on screen; under the "?" key reference, the one it was opened over."""
+        if self.help_open and self.reader == "details":
+            return "help"
+        if self.hist_open:
+            return self.hist_kind
+        return "options"
+
+    def show_tab(self, name: str) -> None:
+        if name not in self.tabs():
+            return
+        if self.help_open and self.reader == "details":
+            self.details_scroll[tuple(self.path)] = self.help_scroll
+        self.commit_field()
+        if self.focus != "cmd":
+            self.focus = "list"
+        self.searching = self.hist_searching = False
+        self.help_open = self.hist_open = False
+        if name == "help":
+            self.open_details()
+            self.help_scroll = self.details_scroll.get(tuple(self.path), 0)
+        elif name == "examples":
+            self.open_examples()
+        elif name == "history":
+            self.open_history()
+
+    def switch_tab(self, step: int) -> None:
+        tabs = self.tabs()
+        if tabs:
+            current = self.current_tab()
+            i = tabs.index(current) if current in tabs else 0
+            self.show_tab(tabs[(i + step) % len(tabs)])
+
     # ---- "?" help ------------------------------------------------------------
 
     def open_help(self) -> None:
@@ -670,6 +715,8 @@ class Session:
             self.help_scroll = 0
         elif key in ("G", keys.KEY_END):
             self.help_scroll = 10_000
+        elif key in ("[", "]"):
+            return self.switch_tab(1 if key == "]" else -1)
         elif key == "?" and self.reader == "details":
             self.open_help()
         elif key == "D" and self.reader == "keys":
@@ -817,8 +864,9 @@ HELP: list[tuple[str, list[tuple[str, str]]]] = [
         ("/", "search"),
         ("i / a", "edit the command box"),
         ("H", "history"),
+        ("[ / ]", "previous / next tab: Options, --help, Examples, History"),
         ("E", "examples from the help page (if it has any)"),
-        ("D", "details: the whole help text of this page"),
+        ("D", "the --help tab: the whole help text of this page"),
         ("Esc", "clear the search filter, else back to the parent command"),
         ("Backspace", "back to the parent command"),
         ("?", "this help"),
@@ -835,6 +883,12 @@ HELP: list[tuple[str, list[tuple[str, str]]]] = [
         ("Esc", "discard the edit"),
         ("↑ / ↓", "previous / next box"),
     ]),
+    ("--help tab", [
+        ("j / k, Ctrl-D / Ctrl-U", "scroll a line / half a page"),
+        ("g / G", "top / bottom"),
+        ("[ / ]", "previous / next tab"),
+        ("Esc / q / h", "back to the options"),
+    ]),
     ("Command box", [
         ("Enter", "done"),
         ("Esc", "back to the options"),
@@ -847,6 +901,7 @@ HELP: list[tuple[str, list[tuple[str, str]]]] = [
         ("r / Ctrl-S", "use the command as-is"),
         ("d", "delete the entry (history only)"),
         ("H / E", "switch between history and examples"),
+        ("[ / ]", "previous / next tab"),
         ("/", "search"),
         ("?", "this help"),
         ("Esc / q / h", "back to the options"),
@@ -937,7 +992,7 @@ def details_segments(s: Session, w: int) -> list[list[Segment]]:
 
 
 def reader_title(s: Session) -> str:
-    return f"Details · {s.title()}" if s.reader == "details" else "Keys"
+    return f"--help · {s.title()}" if s.reader == "details" else "Keys"
 
 
 def reader_segments(s: Session, w: int) -> list[list[Segment]]:
@@ -948,18 +1003,18 @@ def key_hints(s: Session) -> list[tuple[str, str]]:
     """(key, what it does) pairs for the bottom bar."""
     if s.help_open:
         if s.reader == "details":
-            return [("j/k", "scroll"), ("^D/^U", "page"), ("g/G", "top/bottom"), ("?", "keys"), ("esc / D", "close")]
-        return [("j/k", "scroll"), ("D", "details"), ("esc / q / ?", "close")]
+            return [("[ ]", "tabs"), ("j/k", "scroll"), ("^D/^U", "page"), ("g/G", "top/bottom"), ("?", "keys"),
+                    ("esc / D", "close")]
+        return [("j/k", "scroll"), ("D", "--help"), ("esc / q / ?", "close")]
     if s.hist_open:
         if s.hist_searching:
             return [("type", "to filter"), ("↑↓", "move"), ("enter", "edit"), ("^S", "use as-is"), ("esc", "stop")]
         if s.hist_kind == "examples":
-            return [("j/k", "move"), ("enter", "edit"), ("r", "use as-is"), ("/", "search"),
-                    ("H", "history"), ("?", "help"), ("esc", "back")]
-        hints = [("j/k", "move"), ("enter", "edit (opens options)" if s.standalone else "edit"),
-                 ("r", "use as-is"), ("d", "delete"), ("/", "search")]
-        if s.examples and not s.standalone:
-            hints.append(("E", "examples"))
+            return [("[ ]", "tabs"), ("j/k", "move"), ("enter", "edit"), ("r", "use as-is"), ("/", "search"),
+                    ("?", "help"), ("esc", "back")]
+        hints = [] if s.standalone else [("[ ]", "tabs")]
+        hints += [("j/k", "move"), ("enter", "edit (opens options)" if s.standalone else "edit"),
+                  ("r", "use as-is"), ("d", "delete"), ("/", "search")]
         return hints + [("?", "help"), ("esc", "quit" if s.standalone else "back")]
     if s.focus == "list":
         if s.searching:
@@ -972,11 +1027,10 @@ def key_hints(s: Session) -> list[tuple[str, str]]:
             hints = [("j/k", "move"), ("l", "set value"), ("h", "clear"), ("/", "search"), ("^P", "command")]
         else:
             hints = [("j/k", "move"), ("space", "toggle"), ("l", "edit"), ("/", "search"), ("^P", "command")]
+        hints.insert(0, ("[ ]", "tabs"))
         if s.parents:
             hints.append(("esc", "back"))
-        if s.examples:
-            hints.append(("E", f"examples ({len(s.examples)})"))
-        return hints + [("D", "details"), ("^S", "done"), ("?", "help")]
+        return hints + [("^S", "done"), ("?", "help")]
     if s.focus == "cmd":
         return [("enter", "done"), ("^P", "options"), ("tab/↓", "next"), ("esc", "back to list")]
     return [("enter", "set value"), ("esc", "discard"), ("tab/↑↓", "move"), ("^P", "command"), ("^S", "done")]
@@ -1161,6 +1215,34 @@ def history_segments(entry, w: int, query: str = "") -> list[list[Segment]]:
         _mark_matches(line[HISTORY_INDENT:], body_kinds, query)
         kinds = kinds[:HISTORY_INDENT] + body_kinds
         out.append(runs(line, kinds))
+    return out
+
+
+TAB_LABELS = {"options": "Options", "help": "--help", "examples": "Examples", "history": "History"}
+
+
+def _tab_label(s: Session, name: str) -> str:
+    return f" {TAB_LABELS[name]}" + (f" {len(s.examples)}" if name == "examples" else "") + " "
+
+
+def tab_spans(s: Session) -> list[tuple[str, int, int]]:
+    """(tab, start column, end column) of each tab in the tab bar, for clicks."""
+    spans, x = [], 1
+    for name in s.tabs():
+        label = _tab_label(s, name)
+        spans.append((name, x, x + len(label)))
+        x += len(label) + 1
+    return spans
+
+
+def tab_segments(s: Session) -> list[Segment]:
+    """The tab bar: the tab on screen highlighted, the others dim."""
+    current = s.current_tab()
+    out: list[Segment] = [(" ", "")]
+    for name, start, end in tab_spans(s):
+        out += [(_tab_label(s, name), "tab" if name == current else "dim"), (" ", "")]
+    if len(out) > 1:
+        out.append(("  [ ] switch", "punct"))
     return out
 
 

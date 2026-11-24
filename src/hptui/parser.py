@@ -16,6 +16,9 @@ class Option:
     description: str = ""
     spec: str = ""  # the flag text exactly as it appeared, e.g. "-n, --name=STRING"
     aliases: list[str] = field(default_factory=list)  # every flag spelling, e.g. ["-n", "--name"]
+    # The program only takes "--name VALUE" (never "--name=VALUE" or "-nVALUE"); set by a
+    # parser file's `values: separate`.
+    separate_value: bool = False
 
     @property
     def takes_value(self) -> bool:

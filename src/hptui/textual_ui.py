@@ -20,7 +20,7 @@ from .parser import Option
 from .session import (
     ESC, LineEdit, Segment, Session, command_kinds, fit_scroll, history_empty_message,
     history_header, history_segments, history_status, key_hints, list_empty_message, list_segments,
-    new_session, options_header, reader_segments, reader_title, runs, title_segments,
+    new_session, options_header, reader_segments, reader_title, runs, tab_segments, tab_spans, title_segments,
 )
 
 _KEYS = {
@@ -36,7 +36,7 @@ _STYLES = {
     "string": "#50fa7b", "op": "bold #ff5555", "metavar": "#bd93f9", "check": "bold #50fa7b",
     "uncheck": "#6272a4", "time": "#6272a4", "dim": "#6272a4", "match": "bold #282a36 on #f1fa8c",
     "section": "bold #ff79c6", "key": "bold #f1fa8c", "accent": "bold #8be9fd", "label": "#8be9fd",
-    "title": "bold #f1fa8c", "arg": "#ffb86c",
+    "title": "bold #f1fa8c", "arg": "#ffb86c", "tab": "bold #282a36 on #bd93f9",
 }
 STYLE = {k: Style.parse(v) for k, v in _STYLES.items()}
 CURSOR = Style(bgcolor="#44475a", bold=True)  # Dracula "current line"
@@ -319,6 +319,25 @@ class HelpView(SessionView):
         self.refresh()
 
 
+class TabBar(SessionView):
+    """Options · --help · Examples · History; [ and ] switch, or click one."""
+
+    DEFAULT_CSS = "TabBar { height: 1; }"
+
+    def render(self) -> Text:
+        return segments_text(tab_segments(self.s))
+
+    def on_click(self, event: events.Click) -> None:
+        offset = event.get_content_offset(self)
+        if offset is None:
+            return
+        for name, start, end in tab_spans(self.s):
+            if start <= offset.x < end:
+                self.s.show_tab(name)
+                self.app.sync()  # type: ignore[attr-defined]
+                return
+
+
 def keybar_text(s: Session) -> Text:
     out = Text()
     for n, (key, desc) in enumerate(key_hints(s)):
@@ -349,6 +368,7 @@ class HptuiApp(App):
 
     def compose(self) -> ComposeResult:
         yield Static(segments_text(title_segments(self.session.title())), id="title")
+        yield TabBar()
         yield CommandBox()
         yield FieldsView()
         yield OptionsView()
@@ -396,6 +416,8 @@ class HptuiApp(App):
         hist = self.query_one(HistoryView)
         help_view = self.query_one(HelpView)
         help_view.display = s.help_open
+        tab_bar = self.query_one(TabBar)
+        tab_bar.display = bool(s.tabs())
 
         cmd.set_class(s.focus == "cmd" and not s.hist_open and not s.help_open, "-focused")
 
@@ -423,7 +445,7 @@ class HptuiApp(App):
         status.set_class(bool(s.message), "-message")
         self.query_one("#keys", Static).update(keybar_text(s))
 
-        for w in (cmd, fields, options, hist, help_view):
+        for w in (tab_bar, cmd, fields, options, hist, help_view):
             w.refresh()
 
 

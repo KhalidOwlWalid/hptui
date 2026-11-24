@@ -310,6 +310,10 @@ def _cut(text: str, start: int, end: int) -> str:
     return text[:before] + text[after:]
 
 
+def _separate(opt: Option) -> bool:
+    return opt.separate_value and opt.takes_value and not opt.optional_value
+
+
 def _append(text: str, piece: str) -> str:
     if text and not text.endswith(" "):
         text += " "
@@ -319,9 +323,16 @@ def _append(text: str, piece: str) -> str:
 def add_option(text: str, opt: Option, scope: Scope = ROOT, before: int | None = None) -> str:
     """Add an option at the end of the scope's part of the command (before any subcommand, or
     before position `before`, e.g. the first positional argument).
-    Options that need a value get "--name=" (or "-n " for short-only options)."""
+    Options that need a value get "--name=" (or "-n " for short-only options). For programs
+    that only take separate values it's `--name ""`: the empty placeholder keeps the next word
+    (say a positional argument) from being read as the option's value."""
     flag = opt.long or opt.short or opt.spec
-    piece = flag + "=" if opt.takes_value and not opt.optional_value and flag.startswith("--") else flag
+    if _separate(opt):
+        piece = f"{flag} {quote('')}"
+    elif opt.takes_value and not opt.optional_value and flag.startswith("--"):
+        piece = flag + "="
+    else:
+        piece = flag
     if before is not None:  # `hptui git commit` + -c -> `hptui -c git commit`
         return text[:before] + piece + " " + text[before:]
     sub = scope.subcommand_token(text)
@@ -367,6 +378,8 @@ def set_value(text: str, opt: Option, value: str, options: list[Option] | None =
     if occ.style == "sep":
         if occ.value_start is not None:
             if value == "":
+                if _separate(opt):  # keep the placeholder, see add_option
+                    return _splice(text, occ.value_start, occ.value_end, quote(""))
                 return _splice(text, occ.flag_end, occ.value_end, "")
             return _splice(text, occ.value_start, occ.value_end, quote(value))
         if value == "":

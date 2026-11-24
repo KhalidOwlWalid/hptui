@@ -1,0 +1,92 @@
+# hptui parser for kigit: corrections to what hptui reads from `kigit --help`.
+# Install with: hptui parser --file parsers/kigit.toml
+# kigit's help is still read every time, so options added in new versions show up on their own.
+# `kigit gui` has its own argparse help, so it needs no file.
+program = "kigit"
+
+# kigit rejects --output=FILE, -oFILE and bundled flags like -sq
+values = "separate"
+# both just print and exit, so they're no use when building a command
+ignore = ["-h", "-v"]
+
+# "-f, --files OLD NEW": hptui takes one value per option, so NEW goes in REVISION.
+# The prose under WITHOUT GIT ("--files OLD NEW compares ...") is read first and has no -f.
+[options."--files"]
+short = "-f"
+value = "OLD"
+help = "Compare two board files instead of git revisions; put the NEW file in REVISION"
+
+# "--since DATE, --until DATE" is one line in the help: split it into two options
+[options."--since"]
+value = "DATE"
+help = "With --log: only commits after this date (anything git accepts: 2025-01-31, \"2 weeks ago\")"
+
+[options."--until"]
+value = "DATE"
+help = "With --log: only commits before this date"
+
+# The help lists the arguments only in its usage lines
+[positionals.REVISION]
+optional = true
+help = "OLD..NEW (e.g. HEAD~3..HEAD or c46da63..LOCAL) or REV (REV vs the working tree). Empty: HEAD vs the working tree. With --files: the NEW board file"
+
+[positionals.BOARD]
+optional = true
+help = "Board file (.kicad_pcb) to compare. Defaults to the only *.kicad_pcb in the project folder"
+
+# ...and the subcommands only there too
+[subcommands.gui]
+help = "Desktop app for browsing a project's history"
+
+[subcommands.bom]
+help = "Bill of materials of a schematic, with part search links"
+
+[subcommands.example]
+help = "Make an example project (a git repository) to try kigit on"
+
+[subcommands.uninstall]
+help = "Remove this installed kigit"
+
+[[examples]]
+command = "kigit"
+help = "HEAD vs the working tree, including uncommitted changes"
+
+[[examples]]
+command = "kigit <commit_1>..<commit_2> --output example.html"
+help = "Compare two commits and write the diff to example.html"
+
+[[examples]]
+command = "kigit HEAD~3..HEAD"
+help = "The last three commits' worth of changes"
+
+[[examples]]
+command = "kigit c46da63..LOCAL --no-open"
+help = "A commit vs what is on disk now, without opening a browser"
+
+[[examples]]
+command = "kigit -C ~/pcb/project HEAD~1..HEAD"
+help = "Run from anywhere: the project lives in another folder"
+
+[[examples]]
+command = "kigit --files old.kicad_pcb new.kicad_pcb"
+help = "Two board files, no git needed"
+
+[[examples]]
+command = "kigit HEAD~1..HEAD --silkscreen --source"
+help = "Include the silkscreen and the side-by-side source panel"
+
+[[examples]]
+command = "kigit HEAD~1..HEAD --stats --no-open"
+help = "Every changed net, printed to the terminal"
+
+[[examples]]
+command = "kigit --log --kicad-only --since \"2 weeks ago\""
+help = "Commits from the last two weeks that touched the board or schematic"
+
+[[examples]]
+command = "kigit --3d HEAD -o board.glb"
+help = "The board at HEAD as a 3D model"
+
+[[examples]]
+command = "kigit gui"
+help = "The desktop app"

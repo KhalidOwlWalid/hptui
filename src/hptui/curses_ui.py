@@ -8,7 +8,7 @@ from .parser import Option
 from .session import (
     ESC, LineEdit, Segment, Session, command_kinds, fit_scroll, history_empty_message,
     history_header, history_segments, history_status, key_hints, list_empty_message, list_segments,
-    new_session, options_header, reader_segments, reader_title, runs, title_segments,
+    new_session, options_header, reader_segments, reader_title, runs, tab_segments, title_segments,
 )
 
 # kind -> (256-colour fg, 8-colour fg, extra attrs). None = terminal default (dimmed in 8-colour mode).
@@ -31,6 +31,7 @@ PALETTE = {
     "accent": (117, curses.COLOR_CYAN, curses.A_BOLD),
     "label": (117, curses.COLOR_CYAN, 0),
     "title": (228, curses.COLOR_YELLOW, curses.A_BOLD),
+    "tab": (228, curses.COLOR_YELLOW, curses.A_BOLD | curses.A_REVERSE),  # the tab on screen
 }
 _BOLD_WITHOUT_COLOUR = {"program", "flag", "check", "section", "key", "accent", "op"}
 CURSOR_BG_256 = 237  # dark grey bar behind the highlighted row
@@ -71,6 +72,8 @@ class Theme:
     def _compute(self, kind: str, cursor: bool) -> int:
         if not self.colour:
             a = curses.A_BOLD if kind in _BOLD_WITHOUT_COLOUR else 0
+            if kind == "tab":
+                a |= curses.A_BOLD | curses.A_REVERSE
             if kind == "match":
                 a |= curses.A_UNDERLINE
             return a | (curses.A_REVERSE if cursor else 0)
@@ -140,6 +143,7 @@ def draw(win, s: Session, theme: Theme) -> None:
     cursor_pos: tuple[int, int] | None = None
 
     _put_segments(win, 0, 0, title_segments(s.title()), theme)
+    _put_segments(win, 1, 0, tab_segments(s), theme)
 
     # command box, syntax highlighted
     y = 2

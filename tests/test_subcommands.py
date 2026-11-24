@@ -175,7 +175,7 @@ def test_details_shows_the_current_pages_help_text():
     s, _ = make()
     s.help_text = GIT
     press(s, "D")
-    assert s.help_open and s.reader == "details" and reader_title(s) == "Details · git"
+    assert s.help_open and s.reader == "details" and reader_title(s) == "--help · git"
     lines = ["".join(t for t, _ in line) for line in details_segments(s, 80)]
     assert lines[0] == " usage: git [-C <path>] <command> [<args>]"
     kinds = dict((t.strip(), k) for line in details_segments(s, 80) for t, k in line if t.strip())
@@ -191,7 +191,7 @@ def test_details_shows_the_current_pages_help_text():
     # on a subcommand page it shows that subcommand's help
     s.list_index = 2
     press(s, "l", "D")
-    assert reader_title(s) == "Details · git commit"
+    assert reader_title(s) == "--help · git commit"
     assert "usage: git commit" in "".join(t for line in details_segments(s, 80) for t, _ in line)
     press(s, "q", keys.KEY_BACKSPACE)
     assert s.help_text == GIT  # the parent's text comes back with its page

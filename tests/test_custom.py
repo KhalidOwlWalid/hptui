@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from hptui import cmdline, custom, keys
@@ -185,11 +187,11 @@ def test_parser_cli(tmp_path, monkeypatch, capsys, isolated_parsers):
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(hptui, "_help_output", lambda words, flag: ODD_HELP)
-    hptui.parser_main(["--init", "mytool"])
+    hptui.parser_main(["--init", "mytool", "-o", "mytool.txt"])
     made = (tmp_path / "mytool.txt").read_text()
     assert made.startswith("mytool 2.0") and "--- hptui ---\nprogram: mytool\n" in made
     with pytest.raises(SystemExit, match="already exists"):
-        hptui.parser_main(["--init", "mytool"])
+        hptui.parser_main(["--init", "mytool", "-o", "mytool.txt"])
 
     with open(tmp_path / "mytool.txt", "a") as f:
         f.write('options: after "Flags"\nsubcommands: after "Things" before "Flags"\n')
@@ -207,5 +209,65 @@ def test_parser_cli(tmp_path, monkeypatch, capsys, isolated_parsers):
     with pytest.raises(SystemExit, match="no custom parser"):
         hptui.parser_main(["--remove", "mytool"])
 
-    hptui.parser_main(["--init", "git", "commit"])  # subcommand pages get their own file
+    hptui.parser_main(["--init", "git", "commit", "-o", "git-commit.txt"])  # subcommand pages get their own file
     assert "program: git commit" in (tmp_path / "git-commit.txt").read_text()
+
+
+# ---- marker files for kigit (an older kigit's help, pasted and edited) ---------------------
+
+PARSERS = Path(__file__).resolve().parent / "data"
+
+
+def kigit_session(isolated_parsers, command="kigit"):
+    custom.install(PARSERS / "kigit.txt")
+    custom.install(PARSERS / "kigit gui.txt")
+    options, subs, examples, positionals = custom.parse_page("", "kigit")
+    calls = []
+    s = new_session(options, command, subcommands=subs, examples=examples, positionals=positionals,
+                    loader=lambda words: calls.append(words) or "")
+    return s, calls
+
+
+def test_kigit_parser_finds_everything_in_help_order():
+    options, subs, examples, positionals = custom.parse_spec(custom.load_file(PARSERS / "kigit.txt"))
+    keys = [o.key for o in options]
+    assert keys[:3] == ["--files", "--kicad-repo", "--output"] and keys[-1] == "--check-netlist"
+    assert len(keys) == 23 and "--help" not in keys and "--version" not in keys and "--verbose" in keys
+    since, until = (next(o for o in options if o.key == k) for k in ("--since", "--until"))
+    assert since.aliases == ["--since"] and until.aliases == ["--until"] and since.metavar == "DATE"
+    assert [(p.name, p.optional) for p in positionals] == [("REVISION", True), ("BOARD", True)]
+    assert [s.name for s in subs] == ["gui"]
+    assert examples[1].command == "kigit <commit_1>..<commit_2> --output example.html"
+    assert all(o.separate_value for o in options)
+
+
+def test_separate_values_never_use_equals_or_swallow_the_next_word(isolated_parsers):
+    s, _ = kigit_session(isolated_parsers, "kigit HEAD~1..HEAD")
+    output = next(o for o in s.options if o.key == "--output")
+    s.toggle(output, jump_to_field=True)
+    assert s.cmd.text == 'kigit --output "" HEAD~1..HEAD '
+    assert s.field_values()["arg:REVISION"] == "HEAD~1..HEAD"  # not taken as the output file
+    s.cmd.set(cmdline.set_value(s.cmd.text, output, "my diff.html", s.options, s.scope))
+    assert s.cmd.text == 'kigit --output "my diff.html" HEAD~1..HEAD '
+    s.cmd.set(cmdline.set_value(s.cmd.text, output, "", s.options, s.scope))
+    assert s.cmd.text == 'kigit --output "" HEAD~1..HEAD '  # cleared, placeholder kept
+    s.toggle(output, jump_to_field=False)
+    assert s.cmd.text == "kigit HEAD~1..HEAD "
+
+
+def test_values_directive_is_checked(tmp_path):
+    path = write(tmp_path, "mytool.txt", ODD_HELP + "--- hptui ---\nvalues: sometimes\n")
+    with pytest.raises(custom.SpecError, match="values: must be one of"):
+        custom.load_file(path)
+    path = write(tmp_path, "mytool.txt", ODD_HELP + '--- hptui ---\noptions: after "Flags"\n')
+    options, *_ = custom.parse_spec(custom.load_file(path))
+    assert not any(o.separate_value for o in options)
+    assert cmdline.add_option("mytool", options[1]) == "mytool --out="  # the default is unchanged
+
+
+def test_kigit_gui_page_comes_from_its_file(isolated_parsers):
+    s, calls = kigit_session(isolated_parsers)
+    s.list_index = 0
+    s.handle("l")  # open gui
+    assert s.path == ["gui"] and [p.name for p in s.positionals] == ["PROJECT_DIR"]
+    assert calls == []

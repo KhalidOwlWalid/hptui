@@ -1,0 +1,119 @@
+kigit - hover-able, per-net diff of a KiCad PCB between git revisions
+
+USAGE
+    kigit [OPTIONS] [OLD..NEW | OLD NEW | REV] [BOARD.kicad_pcb]
+    kigit gui [PROJECT_DIR] [--port N]                       (desktop app; kigit gui --help)
+    kigit [OPTIONS] --files OLD.kicad_pcb NEW.kicad_pcb      (no git needed)
+    kigit --3d [REV] [-o BOARD.glb]                          (3D board, via kicad-cli)
+    kigit --3d --disk BOARD.kicad_pcb [-o BOARD.glb]         (3D board of a file, no git)
+    kigit bom [REV] [PATH] [--json | --csv]                  (bill of materials; kigit bom --help)
+    kigit example [DIR]                                      (an example project to try kigit on)
+    kigit uninstall [--yes] [--purge]                        (remove this installed kigit)
+
+EXAMPLE
+    Given that you wish to compare 2 different commits, in the repository where .kicad_pcb
+    can be found, run the following command:
+
+    cd <root_directory_of_kicad_pcb>
+    kigit <commit_1>..<commit_2> --output example.html
+
+    This will compare commit 1 and 2 and output the generated pcb and schematic diff at
+    example.html. Simply open the example.html with your browser to view it afterwards.
+
+REVISIONS
+    (none)          HEAD vs the working tree (LOCAL)
+    REV             REV vs the working tree
+    OLD..NEW        two revisions, e.g. HEAD~3..HEAD or c46da63..LOCAL
+    OLD NEW         same, as two arguments
+    LOCAL           the board file on disk, including uncommitted changes
+
+    If OLD is newer than NEW, they are swapped so "added" always means
+    "added in the newer revision" (disable with --no-swap).
+
+BOARD
+    Defaults to the only *.kicad_pcb file in the project folder (searched
+    in subfolders too if the folder itself has none). A relative BOARD is
+    resolved against the project folder.
+
+WITHOUT GIT
+    --files OLD NEW compares two board files directly, e.g. two copies of
+    the same project saved at different times. Passing two .kicad_pcb (or
+    .kicad_pro) files as arguments does the same. OLD comes first.
+
+OPTIONS
+    -f, --files OLD NEW Compare two board files instead of git revisions
+    -C, --kicad-repo DIR
+                        KiCad project folder or git repo to use instead of
+                        the current directory, so kigit can run from anywhere
+    -o, --output FILE   Where to write the HTML ("-" = standard output)
+                        (default: <board folder>/.kigit/<board>-<old>-<new>.html)
+                        This is a web page: open it in a browser, don't run it.
+    -n, --no-open       Don't open the result in a browser
+    -s, --stats         Print every changed net, not just the top 15
+        --silkscreen    Also compare and draw the silkscreen (F/B.SilkS
+                        shapes and text). Off by default: it makes pages bigger
+        --source        Add a source panel to the viewer: the old and new file
+                        text of each changed item (side by side, like a code
+                        diff), shown as you hover. Off by default: it makes
+                        pages bigger
+        --no-swap       Keep the revision order as given
+    -q, --quiet         Only print errors and the output path
+    -V, --verbose       Also print the session log (with debug lines) to stderr
+                        (= --console-level debug)
+
+LOGGING
+    Every run writes a session log, named after when it started
+    (kigit_2026-10-28_14-03-12_<pid>.log). Old logs are kept.
+        --log-dir DIR   Folder for log files (default: $KIGIT_LOG_DIR,
+                        else ~/.local/state/kigit/log)
+        --log-file FILE Append to this file instead (used by the GUI so a
+                        session and the kigit calls it makes share one log)
+        --log-stderr    Also print log lines to stderr (= --console-level info)
+        --log-level LEVEL
+                        Lowest level written to the log file: debug (the
+                        default: everything, for a log sent in with a
+                        problem), info, warning, error or off
+                        ($KIGIT_LOG_LEVEL)
+        --console-level LEVEL
+                        Lowest level printed to stderr: debug, info,
+                        warning, error or off (the default)
+                        ($KIGIT_CONSOLE_LEVEL)
+        --no-log        Don't write a log file
+        --log           Print HEAD's history as JSON, newest first, each commit
+                        flagged if it changed the board or schematic, plus
+                        the uncommitted changes ("local"). Used by the GUI.
+        --max N         With --log: at most N commits (default 2000, 0 = all)
+        --since DATE, --until DATE
+                        With --log: only commits in this date range
+                        (anything git accepts: 2025-01-31, "2 weeks ago")
+        --kicad-only    With --log: only commits that changed the board or a
+                        schematic, searched through the whole history and
+                        following the project across folder renames
+        --projects      Print the KiCad projects in the folder (and below,
+                        see --depth) as JSON. Used by the GUI.
+        --depth N       With --projects: search N levels down (default 2)
+        --rewritten HASH...
+                        Print, as JSON, whether each commit is still on a
+                        branch or tag, and if not, the commits with the same
+                        author and author date (where a rebase or amend put
+                        it). Used by the GUI to move reviews.
+        --3d [REV]      Write the board at REV (default: the working tree) as a
+                        3D model (.glb, binary glTF), made by KiCad's kicad-cli
+                        (KiCad 8 or newer; found on PATH, in the usual install
+                        folder, or at $KIGIT_KICAD_CLI). With the board's 3D
+                        models, tracks, pads, zones, silkscreen and solder mask.
+                        Prints the file's path. Used by the GUI's 3D view.
+        --disk          With --3d: the board file as it is on disk, no git
+                        (kigit --3d --disk BOARD.kicad_pcb). Its folder's 3D
+                        model files come along. Used for Compare folders.
+        --render        Write a picture of the board as it is on disk (top
+                        view, made by kicad-cli's 3D render) to the -o
+                        file (.png). Used by the GUI's recent projects.
+        --json          Write the data (PCB diff + both schematics' nets) as
+                        JSON instead of the HTML viewer
+        --check-netlist FILE
+                        Compare kigit's schematic nets for the NEW revision
+                        with a netlist exported by KiCad
+                        (kicad-cli sch export netlist -o FILE root.kicad_sch)
+    -h, --help          Show this help
+    -v, --version       Show version

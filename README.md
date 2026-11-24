@@ -121,7 +121,8 @@ The option list uses vim-style keys. Arrow keys work everywhere too.
 | search       | `Esc`                       | stop typing but keep results to browse with j/k |
 | option list  | `H` (or `Ctrl-R` anywhere)  | open this program's command history             |
 | option list  | `E`                         | open the examples from the help page            |
-| option list  | `D`                         | details: read this page's whole help text       |
+| option list  | `D`                         | the `--help` tab: this page's whole help text   |
+| lists, help  | `[` / `]`                   | previous / next tab (Options, --help, Examples, History) |
 | history      | `j`/`k`, `g`/`G`, `/`       | move, jump, search (same as the option list)    |
 | history      | `Enter` / `l`               | load the command into the box to tweak it       |
 | history      | `r` / `Ctrl-S`              | run the command as-is                           |
@@ -153,19 +154,78 @@ owns `-m "msg"`. Options ticked on the git page go before `commit`.
 `hptui git commit` opens straight on the commit page, with git's page behind
 it. Loading a history entry or example opens the page of the subcommand it uses.
 
-## Details
+## Tabs
 
-`D` opens the current page's whole help text (the program's description,
-usage, notes and anything else that isn't an option), scrollable with
-`j`/`k`, `Ctrl-D`/`Ctrl-U` and `g`/`G`. On a subcommand page it shows that
-subcommand's help. `Esc` or `D` closes it, and `?` switches to the key reference.
+The screen has tabs above the command box: **Options**, **--help**,
+**Examples** (when the help has any) and **History**. `]` goes to the next tab
+and `[` to the previous one, from the option list, the history and examples
+lists and the `--help` tab. You can also click a tab in the Textual frontend.
+While you're typing (in the command box, a value box or a search), `[` and `]`
+are typed as usual.
+
+The **--help** tab is the page's whole help output: the description, usage,
+notes and everything that isn't an option. Scroll it with `j`/`k`,
+`Ctrl-D`/`Ctrl-U` and `g`/`G`. It remembers where you left it, and on a
+subcommand page it shows that subcommand's help. `D` also opens it, `Esc` goes
+back to the options, and `?` switches to the key reference.
 
 ## Custom parsers
 
-Some programs format their help in ways hptui can't follow. For those, paste
-the help into a text file and add a few lines that point at its sections. The
-installed file then becomes that program's help as far as hptui is concerned:
-`hptui <program>` reads it instead of running `--help`.
+Some programs format their help in ways hptui can't follow. A parser file
+teaches hptui how to read one. There are two kinds:
+
+- **`.toml`: corrections (recommended).** hptui still runs `--help` every time
+  and fixes only the entries the file names. Options a new version adds still
+  show up, and fixing one line means writing one entry.
+- **`.txt`: pasted help plus markers**, for help pages hptui can't make sense
+  of at all. The file *replaces* the help, so it goes stale when the program
+  changes.
+
+### `.toml`: corrections
+
+```toml
+program = "mytool"                # "git commit" for a subcommand's page
+values = "separate"               # the program wants --name VALUE, never --name=VALUE
+ignore = ["-h", "--version"]      # hide entries by name (flags, subcommands, arguments)
+
+[options."--out"]                 # any spelling hptui found: -o or --out
+short = "-o"
+value = "DIR"                     # false: the option takes no value
+help = "where to put it"
+
+[options."--until"]               # hptui read "--since DATE, --until DATE" as one option:
+value = "DATE"                    # naming --until splits it out into its own entry
+
+[options."--color"]               # not in the help at all: added
+value = "WHEN"
+optional_value = true             # --color[=WHEN]
+
+[positionals.FILE]
+help = "files to build"
+optional = true
+repeatable = true
+
+[subcommands.build]
+help = "make the thing"
+aliases = ["b"]
+
+[[examples]]                      # listed before the ones found in the help
+command = "mytool build -o out"
+help = "build into out"
+```
+
+- Options take `short`, `long`, `value`, `optional_value`, `help`, `values`
+  (`"separate"` or `"any"`, overriding the file-wide one) and `hide = true`.
+  Positionals take `help`, `optional`, `repeatable` and `hide`. Subcommands take
+  `help`, `aliases` and `hide`. Examples take `command` and `help`.
+- `help = """..."""` gives help text to use instead of running `--help`, e.g.
+  for a subcommand whose `--help` prints the main page. `from_help = false` uses
+  only the entries in the file.
+- Typos are caught. An unknown key or a wrong type is an error that names the
+  entry, and `--check` lists every entry that matched nothing in the help
+  (`options."--sicne": not in the help, added`).
+
+### `.txt`: pasted help and markers
 
 ```text
 usage: mytool [-h] [-o DIR] [file ...]
@@ -193,20 +253,35 @@ ignore: -h, --bogus
   says which program the file is for, e.g. `program: git commit` for a
   subcommand's page. Otherwise it's taken from the usage line, then the file
   name. Lines starting with `#` are comments.
+- `values: separate` works as in the `.toml` format.
+
+### `values = "separate"`
+
+This is for programs that reject `--name=VALUE` (and `-nVALUE`). Ticking an
+option then writes `--name ""`, and the empty value is replaced by what you
+type. The placeholder stops the next word (say a positional argument) being
+read as the option's value.
+
+### Managing them
 
 ```shell
-hptui parser --init mytool             # mytool.txt: the current help + marker hints
-hptui parser --check mytool.txt        # what the file gives, without installing it
-hptui parser --file mytool.txt         # install it
-hptui parser --init git commit         # git-commit.txt, for the `git commit` page
+hptui parser --init mytool             # mytool.toml: everything hptui finds, commented out, to correct
+hptui parser --init mytool -o mytool.txt   # a marker file: the current help + marker hints
+hptui parser --check mytool.toml       # what the file gives, without installing it
+hptui parser --file mytool.toml        # install it
+hptui parser --init git commit         # git-commit.toml, for the `git commit` page
 hptui parser --list                    # installed parsers
 hptui parser --remove mytool           # back to hptui's own parsing
 ```
 
+Ready-made parser files are kept in [`parsers/`](parsers/), e.g. for `kigit`
+(`hptui parser --file parsers/kigit.toml`).
+
 Installed files live in `~/.config/hptui/parsers/` (`%APPDATA%\hptui\parsers`
 on Windows, or `$HPTUI_PARSERS`), one per program or subcommand page, e.g.
-`mytool.txt` and `git commit.txt`. Markers that point at headings the help
-doesn't contain are reported with their line number when you check or install.
+`mytool.toml` and `git commit.txt`. If a page has both kinds, the `.toml` one is
+used, and installing one kind removes the other. Mistakes in a file are reported
+when you check or install it.
 
 ## Positional arguments
 
@@ -247,6 +322,6 @@ opens the full option editor with the command loaded.
 uv run pytest
 ```
 
-Code layout: `parser.py` reads help text, `custom.py` applies custom parser files, `cmdline.py` edits the command line,
+Code layout: `parser.py` reads help text, `custom.py` applies custom parser files (`overrides.py` for `.toml` ones), `cmdline.py` edits the command line,
 `history.py` and `config.py` handle storage, `session.py` holds all UI state
 and key handling, and `curses_ui.py` / `textual_ui.py` only draw it.

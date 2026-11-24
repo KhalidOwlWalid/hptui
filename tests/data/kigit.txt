@@ -1,0 +1,127 @@
+kigit - hover-able, per-net diff of a KiCad PCB between git revisions
+
+USAGE
+    kigit [OPTIONS] [OLD..NEW | OLD NEW | REV] [BOARD.kicad_pcb]
+    kigit gui [PROJECT_DIR]                                  (desktop app)
+    kigit [OPTIONS] --files OLD.kicad_pcb NEW.kicad_pcb      (no git needed)
+
+    Run it in the folder holding the .kicad_pcb (or point -C at it). The
+    result is an HTML page: open it in a browser.
+
+EXAMPLES
+    # HEAD vs the working tree, including uncommitted changes
+    kigit
+    # Compare two commits and write the diff to example.html
+    kigit <commit_1>..<commit_2> --output example.html
+    # The last three commits' worth of changes
+    kigit HEAD~3..HEAD
+    # A commit vs what is on disk now, without opening a browser
+    kigit c46da63..LOCAL --no-open
+    # Run from anywhere: the project lives in another folder
+    kigit -C ~/pcb/project HEAD~1..HEAD
+    # Two board files, no git needed
+    kigit --files old.kicad_pcb new.kicad_pcb
+    # Include the silkscreen and the side-by-side source panel
+    kigit HEAD~1..HEAD --silkscreen --source
+    # Every changed net, printed to the terminal
+    kigit HEAD~1..HEAD --stats --no-open
+    # Commits from the last two weeks that touched the board or schematic
+    kigit --log --kicad-only --since "2 weeks ago"
+    # The desktop app
+    kigit gui
+
+ARGUMENTS
+    [REVISION]          OLD..NEW (e.g. HEAD~3..HEAD or c46da63..LOCAL) or REV
+                        (REV vs the working tree). Empty: HEAD vs the working
+                        tree. With --files: the NEW board file
+    [BOARD]             Board file (.kicad_pcb) to compare. Defaults to the
+                        only *.kicad_pcb in the project folder
+
+COMMANDS
+    gui                 Desktop app for browsing a project's history
+
+REVISIONS
+    (none)          HEAD vs the working tree (LOCAL)
+    REV             REV vs the working tree
+    OLD..NEW        two revisions, e.g. HEAD~3..HEAD or c46da63..LOCAL
+    OLD NEW         same, as two arguments
+    LOCAL           the board file on disk, including uncommitted changes
+
+    If OLD is newer than NEW, they are swapped so "added" always means
+    "added in the newer revision" (disable with --no-swap).
+
+BOARD
+    Defaults to the only *.kicad_pcb file in the project folder (searched
+    in subfolders too if the folder itself has none). A relative BOARD is
+    resolved against the project folder.
+
+WITHOUT GIT
+    --files OLD NEW compares two board files directly, e.g. two copies of
+    the same project saved at different times. Passing two .kicad_pcb (or
+    .kicad_pro) files as arguments does the same. OLD comes first.
+
+OPTIONS
+    -f, --files OLD     Compare two board files instead of git revisions;
+                        put the NEW file in REVISION
+    -C, --kicad-repo DIR
+                        KiCad project folder or git repo to use instead of
+                        the current directory, so kigit can run from anywhere
+    -o, --output FILE   Where to write the HTML ("-" = standard output)
+                        (default: <board folder>/.kigit/<board>-<old>-<new>.html)
+                        This is a web page: open it in a browser, don't run it.
+    -n, --no-open       Don't open the result in a browser
+    -s, --stats         Print every changed net, not just the top 15
+        --silkscreen    Also compare and draw the silkscreen (F/B.SilkS
+                        shapes and text). Off by default: it makes pages bigger
+        --source        Add a source panel to the viewer: the old and new file
+                        text of each changed item (side by side, like a code
+                        diff), shown as you hover. Off by default: it makes
+                        pages bigger
+        --no-swap       Keep the revision order as given
+    -q, --quiet         Only print errors and the output path
+    -V, --verbose       Also print the session log (with debug lines) to stderr
+
+LOGGING
+    Every run writes a session log, named after when it started
+    (kigit_2026-10-28_14-03-12_<pid>.log). Old logs are kept.
+        --log-dir DIR   Folder for log files (default: $KIGIT_LOG_DIR,
+                        else ~/.local/state/kigit/log)
+        --log-file FILE Append to this file instead (used by the GUI so a
+                        session and the kigit calls it makes share one log)
+        --log-stderr    Also print log lines to stderr
+        --no-log        Don't write a log file
+        --log           Print HEAD's history as JSON, newest first, each commit
+                        flagged if it changed the board or schematic, plus
+                        the uncommitted changes ("local"). Used by the GUI.
+        --max N         With --log: at most N commits (default 2000, 0 = all)
+        --since DATE    With --log: only commits after this date
+                        (anything git accepts: 2025-01-31, "2 weeks ago")
+        --until DATE    With --log: only commits before this date
+        --kicad-only    With --log: only commits that changed the board or a
+                        schematic, searched through the whole history and
+                        following the project across folder renames
+        --projects      Print the KiCad projects in the folder (and below,
+                        see --depth) as JSON. Used by the GUI.
+        --depth N       With --projects: search N levels down (default 2)
+        --json          Write the data (PCB diff + both schematics' nets) as
+                        JSON instead of the HTML viewer
+        --check-netlist FILE
+                        Compare kigit's schematic nets for the NEW revision
+                        with a netlist exported by KiCad
+                        (kicad-cli sch export netlist -o FILE root.kicad_sch)
+    -h, --help          Show this help
+    -v, --version       Show version
+--- hptui ---
+# hptui parser for kigit 0.1.2. Install with: hptui parser --file parsers/kigit.txt
+# Changes from `kigit --help`: runnable EXAMPLES, ARGUMENTS and COMMANDS blocks,
+# --since/--until on their own lines, and --files with one value (NEW goes in REVISION).
+program: kigit
+# kigit rejects --output=FILE, -oFILE and bundled flags like -sq
+values: separate
+examples: after "EXAMPLES" before "ARGUMENTS"
+positionals: after "ARGUMENTS" before "COMMANDS"
+subcommands: after "COMMANDS" before "REVISIONS"
+options: after "OPTIONS" before "LOGGING"
+options: after "LOGGING"
+# both just print and exit, so they're no use when building a command
+ignore: -h, -v

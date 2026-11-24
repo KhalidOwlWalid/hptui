@@ -139,10 +139,24 @@ def _finish(result: str | None, run_it: bool) -> None:
 def _parser_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="hptui parser",
-        description="Custom parsers: paste a program's help into a file, mark where its options, "
-                    "arguments, subcommands and examples are, and hptui uses that file for the program.",
+        description="Custom parsers: teach hptui how to read a program's help. A .toml file corrects "
+                    "what hptui reads from the live --help (fix, split, add or hide entries); a .txt file "
+                    "replaces the help with a pasted copy plus markers saying where each section is.",
         epilog=(
-            "file format (the help, pasted exactly, then markers):\n"
+            ".toml format (corrections; the live --help is still read every time):\n"
+            '  program = "mytool"\n'
+            '  values = "separate"                 # --name VALUE, never --name=VALUE\n'
+            '  ignore = ["-h", "--version"]\n'
+            '  [options."--out"]                   # fix an option: short, long, value, help, hide, ...\n'
+            '  value = "DIR"\n'
+            "  [positionals.FILE]                  # help, optional, repeatable, hide\n"
+            "  optional = true\n"
+            "  [subcommands.build]                 # help, aliases, hide\n"
+            '  help = "make the thing"\n'
+            "  [[examples]]\n"
+            '  command = "mytool build -o out"\n'
+            "\n"
+            ".txt format (the help, pasted exactly, then markers):\n"
             "  usage: mytool [-h] [FILE ...]\n"
             "  ...\n"
             "  --- hptui ---\n"
@@ -153,10 +167,11 @@ def _parser_argparser() -> argparse.ArgumentParser:
             "  ignore: --bogus, help\n"
             "\n"
             "examples:\n"
-            "  hptui parser --init mytool        write mytool.txt from `mytool --help`, to add markers to\n"
-            "  hptui parser --check mytool.txt   show what the file gives, without installing it\n"
-            "  hptui parser --file mytool.txt    install it: `hptui mytool` uses it from now on\n"
-            '  hptui parser --file c.txt --program "git commit"   a file for a subcommand page\n'
+            "  hptui parser --init mytool        write mytool.toml listing what hptui finds, to correct\n"
+            "  hptui parser --init mytool -o mytool.txt   a marker file with the help pasted in instead\n"
+            "  hptui parser --check mytool.toml  show what the file gives, without installing it\n"
+            "  hptui parser --file mytool.toml   install it: `hptui mytool` uses it from now on\n"
+            '  hptui parser --file c.toml --program "git commit"   a file for a subcommand page\n'
             "  hptui parser --list               installed parsers\n"
             "  hptui parser --remove mytool      back to hptui's own parsing"
         ),
@@ -165,13 +180,15 @@ def _parser_argparser() -> argparse.ArgumentParser:
     action = p.add_mutually_exclusive_group(required=True)
     action.add_argument("-f", "--file", type=Path, metavar="FILE", help="check a parser file and install it")
     action.add_argument("--check", type=Path, metavar="FILE", help="show what a parser file gives, without installing it")
-    action.add_argument("--init", nargs="+", metavar="PROGRAM", help="write PROGRAM.txt from PROGRAM's help, ready for markers")
+    action.add_argument("--init", nargs="+", metavar="PROGRAM",
+                        help="write PROGRAM.toml from PROGRAM's help, ready to correct (-o FILE.txt: a marker file)")
     action.add_argument("-l", "--list", action="store_true", help="list installed parsers")
     action.add_argument("--remove", nargs="+", metavar="PROGRAM", help="delete the installed parser for PROGRAM")
     action.add_argument("--path", action="store_true", help="print the folder installed parsers live in")
     p.add_argument("--program", help='what the file is for, e.g. "mytool" or "git commit" '
                                      "(default: its program: line, else the usage line, else the file name)")
-    p.add_argument("-o", "--output", help="with --init: file to write (default: PROGRAM.txt here; - for stdout)")
+    p.add_argument("-o", "--output", help="with --init: file to write (default: PROGRAM.toml here; - for stdout); "
+                                          "a name ending in .txt gives a marker file")
     p.add_argument("--force", action="store_true", help="with --init: overwrite an existing file")
     return p
 
@@ -194,24 +211,33 @@ def parser_main(argv: list[str]) -> None:
             raise SystemExit(f"hptui: no custom parser installed for {' '.join(args.remove)}")
         print(f"removed {path}")
     elif args.init:
-        out = args.output or "-".join([compat.program_name(args.init[0]), *args.init[1:]]) + custom.SUFFIX
+        out = args.output or "-".join([compat.program_name(args.init[0]), *args.init[1:]]) + custom.TOML
+        markers = out.lower().endswith(custom.SUFFIX)
         if out != "-" and Path(out).exists() and not args.force:
             raise SystemExit(f"hptui: {out} already exists (use --force to overwrite)")
-        text = load_subcommand_help(args.init) if len(args.init) > 1 else _quiet_help(args.init[0])
+        text = _page_help(args.init)
         if not text.strip():
-            print(f"hptui: `{' '.join(args.init)} --help` printed nothing; paste the help into the file yourself",
-                  file=sys.stderr)
-        content = custom.template(text, args.init)
+            hint = "paste the help into the file yourself" if markers else 'add its entries yourself, or a help = """...""" text'
+            print(f"hptui: `{' '.join(args.init)} --help` printed nothing; {hint}", file=sys.stderr)
+        if markers:
+            content = custom.template(text, args.init)
+        else:
+            names = [compat.program_name(args.init[0]), *args.init[1:]]
+            content = custom.overrides.template(custom.builtin(text, names[0]), names)
         if out == "-":
             print(content, end="")
         else:
             Path(out).write_text(content, encoding="utf-8")
-            print(f"wrote {out}: add markers at the bottom, check it with `hptui parser --check {out}`, "
+            todo = "add markers at the bottom" if markers else "uncomment and fix the entries hptui got wrong"
+            print(f"wrote {out}: {todo}, check it with `hptui parser --check {out}`, "
                   f"then install it with `hptui parser --file {out}`")
     else:
         source = args.file or args.check
         spec = custom.load_file(source, words)
-        for line in custom.summary(spec):
+        live = ""
+        if isinstance(spec, custom.Overrides) and spec.help is None and spec.from_help:
+            live = _page_help(spec.words)
+        for line in custom.summary(spec, live):
             print(line)
         if args.file:
             _, dest, replaced = custom.install(source, words)
@@ -223,6 +249,11 @@ def _quiet_help(program: str) -> str:
         return _help_output([program], "--help")
     except (OSError, subprocess.TimeoutExpired):
         return ""
+
+
+def _page_help(words: list[str]) -> str:
+    """The live help for a program or subcommand page, or "" if it can't be run."""
+    return load_subcommand_help(words) if len(words) > 1 else _quiet_help(words[0])
 
 
 def main() -> None:
